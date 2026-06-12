@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -114,32 +115,34 @@ class SQLiteJobStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(self.db_path),
-            check_same_thread=False,  # we control access; fine for our usage
+            check_same_thread=False,
         )
         self._conn.row_factory = sqlite3.Row
+        self._lock = threading.Lock()  # protect concurrent access from worker thread + main
         self._init_schema()
 
     def _init_schema(self) -> None:
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                priority INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                request_json TEXT NOT NULL,
-                result_json TEXT,
-                error TEXT,
-                callback_key TEXT,
-                tags_json TEXT
+        with self._lock:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    result_json TEXT,
+                    error TEXT,
+                    callback_key TEXT,
+                    tags_json TEXT
+                )
+                """
             )
-            """
-        )
-        # Helpful indexes for common queries
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority DESC, created_at)")
-        self._conn.commit()
+            # Helpful indexes for common queries
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority DESC, created_at)")
+            self._conn.commit()
 
     def _row_to_dict(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
@@ -167,31 +170,33 @@ class SQLiteJobStore:
         now = _now_iso()
         tags = request.tags or []
 
-        self._conn.execute(
-            """
-            INSERT INTO jobs (
-                id, status, priority, created_at, updated_at,
-                request_json, result_json, error, callback_key, tags_json
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
-            """,
-            (
-                job_id,
-                JobStatus.QUEUED.value,
-                request.priority,
-                now,
-                now,
-                json.dumps(asdict(request), default=str),
-                callback_key,
-                json.dumps(tags),
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO jobs (
+                    id, status, priority, created_at, updated_at,
+                    request_json, result_json, error, callback_key, tags_json
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                """,
+                (
+                    job_id,
+                    JobStatus.QUEUED.value,
+                    request.priority,
+                    now,
+                    now,
+                    json.dumps(asdict(request), default=str),
+                    callback_key,
+                    json.dumps(tags),
+                ),
+            )
+            self._conn.commit()
         return job_id
 
     def get(self, job_id: str) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT * FROM jobs WHERE id = ?", (job_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
         return self._row_to_dict(row)
 
     def list(
@@ -222,7 +227,8 @@ class SQLiteJobStore:
         query += " ORDER BY priority DESC, created_at ASC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
-        rows = self._conn.execute(query, params).fetchall()
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
         return [d for r in rows if (d := self._row_to_dict(r)) is not None]
 
     def update_status(
@@ -233,30 +239,32 @@ class SQLiteJobStore:
         error: str | None = None,
     ) -> None:
         now = _now_iso()
-        self._conn.execute(
-            "UPDATE jobs SET status = ?, updated_at = ?, error = COALESCE(?, error) WHERE id = ?",
-            (status.value, now, error, job_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE jobs SET status = ?, updated_at = ?, error = COALESCE(?, error) WHERE id = ?",
+                (status.value, now, error, job_id),
+            )
+            self._conn.commit()
 
     def set_result(self, job_id: str, result: JobResult) -> None:
         now = _now_iso()
         # Also update status from the result
-        self._conn.execute(
-            """
-            UPDATE jobs
-            SET status = ?, result_json = ?, updated_at = ?, error = ?
-            WHERE id = ?
-            """,
-            (
-                result.status.value,
-                json.dumps(asdict(result), default=str),
-                now,
-                result.error,
-                job_id,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, result_json = ?, updated_at = ?, error = ?
+                WHERE id = ?
+                """,
+                (
+                    result.status.value,
+                    json.dumps(asdict(result), default=str),
+                    now,
+                    result.error,
+                    job_id,
+                ),
+            )
+            self._conn.commit()
 
     def claim_for_processing(self, job_id: str) -> bool:
         """Attempt to move QUEUED -> PROCESSING atomically.
@@ -264,15 +272,16 @@ class SQLiteJobStore:
         Uses a simple UPDATE ... WHERE for basic safety.
         """
         now = _now_iso()
-        cur = self._conn.execute(
-            """
-            UPDATE jobs
-            SET status = ?, updated_at = ?
-            WHERE id = ? AND status = ?
-            """,
-            (JobStatus.PROCESSING.value, now, job_id, JobStatus.QUEUED.value),
-        )
-        self._conn.commit()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (JobStatus.PROCESSING.value, now, job_id, JobStatus.QUEUED.value),
+            )
+            self._conn.commit()
         return cur.rowcount > 0
 
     def close(self) -> None:

@@ -24,7 +24,7 @@ def _temp_db() -> Path:
 
 def test_submit_and_get_basic():
     db = _temp_db()
-    h = Hoglah(config={"db_path": db})
+    h = Hoglah(config={"db_path": db}, start_worker=False)
 
     job_id = h.submit(
         prompt="Hello world",
@@ -48,7 +48,7 @@ def test_submit_and_get_basic():
 
 def test_list_and_filter():
     db = _temp_db()
-    h = Hoglah(config={"db_path": db})
+    h = Hoglah(config={"db_path": db}, start_worker=False)
 
     j1 = h.submit(prompt="one", model="gemma:2b", tags=["a"])
     j2 = h.submit(prompt="two", model="gemma:2b", tags=["b"])
@@ -63,7 +63,7 @@ def test_list_and_filter():
 
 def test_cancel_and_wait_timeout():
     db = _temp_db()
-    h = Hoglah(config={"db_path": db})
+    h = Hoglah(config={"db_path": db}, start_worker=False)
 
     job_id = h.submit(prompt="will be cancelled", model="gemma:2b")
 
