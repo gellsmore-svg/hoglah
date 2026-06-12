@@ -23,7 +23,14 @@ class JobStatus(str, Enum):
 
 @dataclass(frozen=True)
 class JobResult:
-    """The value returned for a finished (or failed) job."""
+    """The value returned for a finished (or failed) job.
+
+    Per operator guidance:
+    - Always attempt to produce a result even if context truncation occurred.
+    - Include explicit truncation metadata so callers know the supplied
+      prompt/context was (or may have been) truncated by the model or the
+      queue manager.
+    """
 
     job_id: str
     status: JobStatus
@@ -36,6 +43,12 @@ class JobResult:
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     parent_job_id: str | None = None
+
+    # Context / truncation handling (ADR-009)
+    truncated: bool = False
+    truncation_reason: str | None = None  # e.g. "model_context_limit", "num_ctx_exceeded", "prompt_too_long"
+    estimated_prompt_tokens: int | None = None
+    effective_num_ctx: int | None = None
 
 
 # Type alias for user callbacks
