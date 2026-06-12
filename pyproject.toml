@@ -34,6 +34,7 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.7",
+    "pydantic-settings>=2.0",
     "ollama>=0.3",  # official ollama python client
 ]
 
@@ -49,7 +50,7 @@ cli = [
 ]
 
 [project.scripts]
-hoglah = "hoglah.cli:main"
+hoglah = "hoglah.cli:main"  # typer app via wrapper
 
 [project.urls]
 Homepage = "https://github.com/gellsmore-svg/hoglah"
