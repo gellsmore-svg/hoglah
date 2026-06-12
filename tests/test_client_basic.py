@@ -41,7 +41,7 @@ def test_submit_and_get_basic():
     assert "test" in res.tags
 
     # New instance (simulates restart) should still see the job
-    h2 = Hoglah(config={"db_path": db})
+    h2 = Hoglah(config={"db_path": db}, start_worker=False)
     res2 = h2.get(job_id)
     assert res2.status == JobStatus.QUEUED
 

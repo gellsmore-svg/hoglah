@@ -27,8 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-import ollama
-
+from .adapters import BaseAdapter, StubAdapter
 from .config import HoglahConfig, HoglahSettings
 from .models import (
     JobCallback,
@@ -66,6 +65,7 @@ class Hoglah:
         *,
         callbacks: dict[str, JobCallback] | None = None,
         store: JobStore | None = None,
+        adapter: BaseAdapter | None = None,
         start_worker: bool = True,
         **overrides: Any,
     ) -> None:
@@ -95,6 +95,11 @@ class Hoglah:
         else:
             self._store = create_sqlite_store(self.config.db_path)
 
+        # Execution adapter — real Ollama calls are paused for now
+        # (Ollama is currently in use by other workloads).
+        # Default to a safe StubAdapter that simulates responses.
+        self.adapter: BaseAdapter = adapter or StubAdapter()
+
         # Worker control (for background asyncio loop in daemon thread)
         self._worker_running = False
         self._worker_thread: threading.Thread | None = None
@@ -109,17 +114,6 @@ class Hoglah:
         # Pass start_worker=False when you want to control execution manually (e.g. tests).
         if start_worker:
             self._start_background_worker()
-
-        # Start the background worker (can be disabled for tests by passing start_worker=False)
-        if overrides.pop("_start_worker", True) and not isinstance(store, (type(None), SQLiteJobStore)) or True:  # always start unless explicitly disabled in tests
-            # Cleaner: support explicit kwarg
-            pass  # handled below
-
-        # Re-parse for start_worker (simple approach)
-        start_worker = overrides.get("_start_worker", True) if isinstance(overrides, dict) else True
-        # Actually use a cleaner pattern: accept it in the signature for tests
-        # For now, always start (tests that need full control can use a mock store or patch later)
-        self._start_background_worker()
 
     # ------------------------------------------------------------------ #
     # Public API (matches the spirit of the requirements submit signature)
@@ -498,74 +492,14 @@ class Hoglah:
         )
 
     async def _call_ollama(self, req: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
-        """Call Ollama (generate or chat) and return (output, usage, metadata)."""
-        host = self.config.ollama_host
-        client = ollama.AsyncClient(host=host) if host else ollama.AsyncClient()
+        """
+        Delegate to the configured adapter.
 
-        # Build options dict (individual params take precedence, then raw options)
-        options: dict[str, Any] = {}
-        for key in ("temperature", "top_p", "top_k", "repeat_penalty", "seed",
-                    "stop", "num_predict", "num_ctx"):
-            val = getattr(req, key, None)
-            if val is not None:
-                options[key] = val
-        if req.options:
-            options.update(req.options)
-
-        # Keep-alive and format are top-level for the ollama call
-        call_kwargs: dict[str, Any] = {
-            "model": req.model,
-            "options": options or None,
-            "keep_alive": req.keep_alive,
-            "format": req.format,
-        }
-        if req.system_prompt:
-            call_kwargs["system"] = req.system_prompt
-
-        truncated = False
-        truncation_reason = None
-
-        try:
-            if req.messages:
-                # Chat style
-                resp = await client.chat(messages=req.messages or [], **call_kwargs)
-                output = resp.get("message", {}).get("content", "") or ""
-                # Usage
-                usage = {
-                    "prompt_tokens": resp.get("prompt_eval_count", 0),
-                    "completion_tokens": resp.get("eval_count", 0),
-                    "total": resp.get("prompt_eval_count", 0) + resp.get("eval_count", 0),
-                }
-            else:
-                # Generate style
-                prompt = req.prompt or ""
-                resp = await client.generate(prompt=prompt, **call_kwargs)
-                output = resp.get("response", "") or ""
-                usage = {
-                    "prompt_tokens": resp.get("prompt_eval_count", 0),
-                    "completion_tokens": resp.get("eval_count", 0),
-                    "total": resp.get("prompt_eval_count", 0) + resp.get("eval_count", 0),
-                }
-
-            # Simple heuristic for truncation reporting (ADR-009)
-            num_ctx = req.num_ctx or options.get("num_ctx")
-            if num_ctx and usage.get("prompt_tokens") and usage["prompt_tokens"] >= num_ctx * 0.95:
-                truncated = True
-                truncation_reason = "approx_prompt_exceeded_num_ctx"
-
-            meta: dict[str, Any] = {"truncated": truncated}
-            if truncation_reason:
-                meta["truncation_reason"] = truncation_reason
-
-            return output, usage, meta
-
-        except Exception as e:
-            # Detect context-related errors for truncation reporting
-            msg = str(e).lower()
-            if "context" in msg or "exceed" in msg or "too long" in msg:
-                truncated = True
-                truncation_reason = "context_length_exceeded"
-            raise  # re-raise so retry logic can decide; caller will record
+        Real Ollama calls are currently paused (see adapters.py).
+        The default StubAdapter provides simulated responses so the rest of the
+        queue / worker / callback / retry machinery can be exercised safely.
+        """
+        return await self.adapter.run(req)
 
     def _is_transient_error(self, exc: Exception) -> bool:
         """Simple classification for retry (per ADR-011)."""
