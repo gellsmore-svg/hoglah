@@ -1,0 +1,41 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-06-12T18:40:00+00:00",
+  "domains": [
+    {
+      "name": "ams",
+      "path": "AMS",
+      "aliases": [
+        "AMS",
+        "ams-books"
+      ],
+      "status": "active"
+    },
+    {
+      "name": "context",
+      "path": "context",
+      "aliases": [],
+      "status": "active"
+    },
+    {
+      "name": "healing",
+      "path": "healing",
+      "aliases": [],
+      "status": "active"
+    },
+    {
+      "name": "mnemosyne",
+      "path": "Mnemosyne",
+      "aliases": [],
+      "status": "active"
+    },
+    {
+      "name": "hoglah",
+      "path": "Hoglah",
+      "aliases": [],
+      "status": "active",
+      "github": "https://github.com/gellsmore-svg/hoglah",
+      "description": "Lightweight local-first job queue manager and Ollama wrapper for resource-constrained environments."
+    }
+  ]
+}
