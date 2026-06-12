@@ -51,7 +51,7 @@ def test_list_and_filter():
     h = Hoglah(config={"db_path": db}, start_worker=False)
 
     j1 = h.submit(prompt="one", model="gemma:2b", tags=["a"])
-    j2 = h.submit(prompt="two", model="gemma:2b", tags=["b"])
+    h.submit(prompt="two", model="gemma:2b", tags=["b"])
 
     all_jobs = h.list(limit=10)
     assert len(all_jobs) == 2
@@ -144,3 +144,158 @@ def test_direct_callback_not_redelivered_after_restart():
     # The callback should NOT have been called by the new instance
     # (it was only remembered inside h1)
     assert len(calls) == 0  # because we didn't call it ourselves in this test
+
+
+# --------------------------------------------------------------------------- #
+# Basic CLI tests (using Typer CliRunner). These exercise the submit/list etc
+# paths through the Click/Typer layer with the live Hoglah client (stub mode).
+# --------------------------------------------------------------------------- #
+
+try:
+    from typer.testing import CliRunner
+    from hoglah.cli import app
+    _HAS_CLI_RUNNER = True
+except Exception:
+    _HAS_CLI_RUNNER = False
+
+
+@pytest.mark.skipif(not _HAS_CLI_RUNNER, reason="typer not installed for CLI tests")
+def test_cli_submit_and_list(tmp_path):
+    db = tmp_path / "cli.db"
+    runner = CliRunner()
+
+    # Submit a job (prompt style) and wait for it (exercises worker + result path)
+    result = runner.invoke(
+        app,
+        [
+            "submit",
+            "CLI test prompt via runner",
+            "--model",
+            "cli-test:stub",
+            "--wait",
+            "--timeout",
+            "30",
+            "--db",
+            str(db),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Submitted:" in result.output
+
+    # List should show the completed job
+    list_res = runner.invoke(app, ["list", "--limit", "5", "--db", str(db)])
+    assert list_res.exit_code == 0
+    assert "cli-test:stub" in list_res.output or "completed" in list_res.output
+
+    # Models (stub) should work
+    models_res = runner.invoke(app, ["models", "--db", str(db)])
+    assert models_res.exit_code == 0
+    assert "stub-model" in models_res.output
+
+    # ps alias should work (like list)
+    ps_res = runner.invoke(app, ["ps", "--limit", "3", "--db", str(db)])
+    assert ps_res.exit_code == 0
+    assert "JOB_ID" in ps_res.output or "completed" in ps_res.output.lower()
+
+    # JSON output for list
+    json_res = runner.invoke(app, ["list", "--json", "--limit", "2", "--db", str(db)])
+    assert json_res.exit_code == 0
+    assert '"job_id"' in json_res.output or '"status"' in json_res.output
+    # basic parse
+    import json as _json
+    data = _json.loads(json_res.output)
+    assert isinstance(data, list) and len(data) >= 1
+
+    # New submit flags (metadata + parent_job_id) + ps already covered above
+    meta_submit = runner.invoke(
+        app,
+        [
+            "submit",
+            "test with metadata",
+            "--model",
+            "cli-meta:stub",
+            "--metadata",
+            '{"agent":"test","priority":5}',
+            "--parent-job-id",
+            "parent-123",
+            "--wait",
+            "--db",
+            str(db),
+        ],
+    )
+    assert meta_submit.exit_code == 0
+    # The result should have succeeded (via stub)
+    assert "Submitted:" in meta_submit.output or "completed" in meta_submit.output.lower()
+
+    # stats command
+    stats_res = runner.invoke(app, ["stats", "--db", str(db)])
+    assert stats_res.exit_code == 0
+    assert "total" in stats_res.output.lower() or "queued" in stats_res.output.lower()
+
+    stats_json = runner.invoke(app, ["stats", "--json", "--db", str(db)])
+    assert stats_json.exit_code == 0
+    data = _json.loads(stats_json.output)
+    assert "counts" in data and "total_jobs" in data
+
+
+@pytest.mark.skipif(not _HAS_CLI_RUNNER, reason="typer not installed for CLI tests")
+def test_cli_submit_with_messages_json(tmp_path):
+    db = tmp_path / "cli2.db"
+    runner = CliRunner()
+
+    msgs = '[{"role":"user","content":"test chat from cli"}]'
+    result = runner.invoke(
+        app,
+        [
+            "submit",
+            "--model",
+            "cli-chat:stub",
+            "--messages",
+            msgs,
+            "--wait",
+            "--db",
+            str(db),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Submitted:" in result.output
+    assert "[STUB-CHAT]" in result.output or "Responded" in result.output  # from stub output
+
+    # Verify via status too
+    # We don't have the exact ID easily, but list should show the model
+    list_res = runner.invoke(app, ["list", "--db", str(db)])
+    assert "cli-chat:stub" in list_res.output
+
+
+def test_hoglah_context_manager():
+    """Hoglah supports the context manager protocol and cleans up on exit."""
+    db = _temp_db()
+    with Hoglah(config={"db_path": db}, start_worker=True) as h:
+        assert h is not None
+        job_id = h.submit(prompt="context manager test", model="cm-test")
+        res = h.wait(job_id, timeout=10)
+        assert res.status in (JobStatus.COMPLETED, JobStatus.FAILED)
+    # After the with block, close has been called (worker stopped).
+    # We can still inspect the store via a fresh instance.
+    h2 = Hoglah(config={"db_path": db}, start_worker=False)
+    assert h2.status(job_id) == res.status
+    h2.close()
+
+
+def test_stats():
+    """Basic queue stats via client (and CLI uses it)."""
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db}, start_worker=False)
+    j1 = h.submit(prompt="s1", model="x")
+    h.submit(prompt="s2", model="x")
+
+    s = h.stats()
+    assert s["total_jobs"] == 2
+    assert s["queued"] == 2
+    assert s["counts"]["queued"] == 2
+
+    h.cancel(j1)
+    s2 = h.stats()
+    assert s2["cancelled"] >= 1
+
+    h.close()

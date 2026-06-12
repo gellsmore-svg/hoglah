@@ -50,4 +50,8 @@ This corresponds to the core job management loop described in the initial requir
 
 ## Status
 
-Initial requirements captured (2026-06-12). No implementation yet. Metadata and skeleton scaffolding in progress.
+- 2026-06-12: Initial requirements + review decisions + Chunks 1-3 (client, store, worker, pluggable adapters + full real OllamaAdapter, rich CLI, examples).
+- `Hoglah(use_real=True)`, expanded submit (messages + sampling params), `hoglah run`, polished list, 13 tests.
+- Default is always-safe StubAdapter. Real path is one flag/env/kwarg away.
+- Version 0.2.0. examples/basic_usage.py + very usable from both Python and CLI.
+- All tests green. Ready for real Ollama when the server is free.

@@ -20,24 +20,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from .adapters import BaseAdapter, StubAdapter
+from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
 from .config import HoglahConfig, HoglahSettings
 from .models import (
     JobCallback,
     JobRequest,
     JobResult,
     JobStatus,
-    new_job_id,
     normalize_request,
 )
-from .store import JobStore, SQLiteJobStore, create_sqlite_store
+from .store import JobStore, create_sqlite_store
 
 logger = logging.getLogger("hoglah")
 
@@ -57,6 +56,16 @@ class Hoglah:
         )
         print(h.status(job_id))
         result = h.wait(job_id)
+
+    Context manager (recommended for scripts):
+        with Hoglah() as h:
+            job_id = h.submit(...)
+            result = h.wait(job_id)
+
+    Real execution (when Ollama is available):
+        from hoglah import Hoglah, OllamaAdapter
+        h = Hoglah(use_real=True)                    # or adapter=OllamaAdapter()
+        # or: h = Hoglah(config={"ollama_host": "http://..."}, use_real=True)
     """
 
     def __init__(
@@ -66,6 +75,7 @@ class Hoglah:
         callbacks: dict[str, JobCallback] | None = None,
         store: JobStore | None = None,
         adapter: BaseAdapter | None = None,
+        use_real: bool = False,
         start_worker: bool = True,
         **overrides: Any,
     ) -> None:
@@ -95,10 +105,17 @@ class Hoglah:
         else:
             self._store = create_sqlite_store(self.config.db_path)
 
-        # Execution adapter — real Ollama calls are paused for now
-        # (Ollama is currently in use by other workloads).
-        # Default to a safe StubAdapter that simulates responses.
-        self.adapter: BaseAdapter = adapter or StubAdapter()
+        # Execution adapter selection (priority order):
+        #   1. Explicit adapter= passed in
+        #   2. use_real=True kwarg (or HOGLAH_USE_REAL_ADAPTER env)
+        #   3. Safe default: StubAdapter (no network, works everywhere)
+        if adapter is None:
+            env_wants_real = os.environ.get("HOGLAH_USE_REAL_ADAPTER", "").lower() in ("1", "true", "yes", "on")
+            if use_real or env_wants_real:
+                adapter = OllamaAdapter(host=self.config.ollama_host)
+            else:
+                adapter = StubAdapter()
+        self.adapter: BaseAdapter = adapter
 
         # Worker control (for background asyncio loop in daemon thread)
         self._worker_running = False
@@ -443,7 +460,7 @@ class Hoglah:
     async def _execute_with_retries(self, job_id: str, request: JobRequest) -> JobResult:
         """Run the Ollama call, with simple retry for transient errors."""
         max_retries = getattr(request, "max_retries", 2) or 2
-        timeout = getattr(request, "timeout_seconds", None)
+        _timeout = getattr(request, "timeout_seconds", None)  # respected by caller / adapter if needed
 
         last_error = None
         for attempt in range(max_retries + 1):
@@ -493,11 +510,7 @@ class Hoglah:
 
     async def _call_ollama(self, req: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
         """
-        Delegate to the configured adapter.
-
-        Real Ollama calls are currently paused (see adapters.py).
-        The default StubAdapter provides simulated responses so the rest of the
-        queue / worker / callback / retry machinery can be exercised safely.
+        Delegate to the configured adapter (Stub by default; OllamaAdapter for real).
         """
         return await self.adapter.run(req)
 
@@ -530,7 +543,7 @@ class Hoglah:
         for row in self._store.list(status=JobStatus.PROCESSING, limit=50):
             job_id = row["id"]
             req = row.get("request", {})
-            max_r = req.get("max_retries", 2)
+            _max_r = req.get("max_retries", 2)  # available for future more sophisticated recovery policy
 
             # Simple policy: move back to QUEUED so the worker can retry.
             # (We could also mark FAILED with "interrupted" if we tracked attempts.)
@@ -546,6 +559,33 @@ class Hoglah:
             self._worker_thread.join(timeout=3.0)
         if hasattr(self._store, "close"):
             self._store.close()
+
+    def stats(self) -> dict[str, Any]:
+        """Return basic queue statistics (status counts, totals).
+
+        Useful for monitoring or dashboards. Example:
+            s = h.stats()
+            print(s["counts"])
+        """
+        counts = self._store.get_status_counts() if hasattr(self._store, "get_status_counts") else {}
+        total = sum(counts.values()) if counts else 0
+        return {
+            "counts": counts,
+            "total_jobs": total,
+            "queued": counts.get(JobStatus.QUEUED.value, 0),
+            "processing": counts.get(JobStatus.PROCESSING.value, 0),
+            "completed": counts.get(JobStatus.COMPLETED.value, 0),
+            "failed": counts.get(JobStatus.FAILED.value, 0),
+            "cancelled": counts.get(JobStatus.CANCELLED.value, 0),
+        }
+
+    def __enter__(self) -> "Hoglah":
+        """Support `with Hoglah(...) as h:` for automatic cleanup."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        self.close()
+        return False  # do not suppress exceptions
 
 
 # For convenience in __init__.py
