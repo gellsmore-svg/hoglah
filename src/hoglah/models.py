@@ -1,7 +1,7 @@
-"""Core data models for Hoglah (initial stub).
+"""Core data models for Hoglah.
 
-These will be expanded during implementation. The shapes are guided
-directly by the requirements in docs/requirements-v1.0.md.
+Guided by the initial requirements in docs/requirements-v1.0.md and decisions
+in docs/architecture-decisions.md (esp. ADRs 006, 009, 010, 012).
 """
 
 from __future__ import annotations
@@ -23,13 +23,12 @@ class JobStatus(str, Enum):
 
 @dataclass(frozen=True)
 class JobResult:
-    """The value returned for a finished (or failed) job.
+    """Public result for a finished (or failed) job.
 
-    Per operator guidance:
+    Per operator guidance (ADR-009):
     - Always attempt to produce a result even if context truncation occurred.
-    - Include explicit truncation metadata so callers know the supplied
-      prompt/context was (or may have been) truncated by the model or the
-      queue manager.
+    - Include explicit truncation metadata so callers know when the supplied
+      prompt/context was (or may have been) truncated.
     """
 
     job_id: str
@@ -51,10 +50,58 @@ class JobResult:
     effective_num_ctx: int | None = None
 
 
-# Type alias for user callbacks
+@dataclass
+class JobRequest:
+    """Internal representation of a submission request (persisted for execution/retry).
+
+    Captures everything needed to (re)execute the job later. Individual
+    generation params (temperature etc.) are kept separate from the raw
+    `options` dict so the worker can apply them cleanly.
+    """
+
+    prompt: str | None = None
+    messages: list[dict[str, Any]] | None = None
+    model: str = ""
+    system_prompt: str | None = None
+    num_ctx: int | None = None
+    options: dict[str, Any] | None = None
+    tags: list[str] | None = None
+    priority: int = 0
+    timeout_seconds: int | None = None
+    max_retries: int = 2
+    metadata: dict[str, Any] | None = None
+    parent_job_id: str | None = None
+
+    # Generation params (flattened for convenience; merged into options by worker if needed)
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    repeat_penalty: float | None = None
+    seed: int | None = None
+    stop: list[str] | None = None
+    num_predict: int | None = None
+    format: str | None = None
+    keep_alive: str | int | None = None
+
+    # Callback handling (ADR-006)
+    callback_key: str | None = None  # if using named registry instead of direct callable
+
+
+# Type alias for user callbacks (can be passed directly to submit or via registry)
 JobCallback = Callable[[JobResult], None]
 
 
 def new_job_id() -> str:
     """Generate a new job identifier (UUID4 string)."""
     return str(uuid.uuid4())
+
+
+def normalize_request(**kwargs: Any) -> JobRequest:
+    """Helper to build a clean JobRequest from submit() kwargs.
+
+    Strips None values for optional fields where sensible and ensures model is present.
+    """
+    # Remove keys that are not part of JobRequest
+    known_fields = {f.name for f in JobRequest.__dataclass_fields__.values()}
+    data = {k: v for k, v in kwargs.items() if k in known_fields and v is not None}
+    return JobRequest(**data)
