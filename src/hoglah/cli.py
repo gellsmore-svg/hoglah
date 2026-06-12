@@ -151,6 +151,31 @@ def stats(
 
 
 @app.command()
+def pull(
+    model: str = typer.Argument(..., help="Model name to pull (e.g. gemma3:1b)"),
+    real: bool = typer.Option(False, "--real", help="Use real Ollama (default is stub which does nothing)"),
+    ollama_host: str | None = typer.Option(None, "--ollama-host"),
+) -> None:
+    """Ensure a model is pulled (useful before submit with --real)."""
+    if not real:
+        typer.secho("pull: --real not specified; stub does nothing. Use --real to pull from Ollama.", fg=typer.colors.YELLOW)
+        return
+
+    from .adapters import OllamaAdapter
+    adapter = OllamaAdapter(host=ollama_host)
+    import asyncio
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(adapter.pull_model(model))
+        loop.close()
+        typer.secho(f"Pulled (or already present): {model}", fg=typer.colors.GREEN)
+    except Exception as e:
+        typer.secho(f"Pull failed for {model}: {e}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+
+@app.command()
 def status(
     job_id: str,
     db: Path | None = typer.Option(None, "--db"),

@@ -579,6 +579,25 @@ class Hoglah:
             "cancelled": counts.get(JobStatus.CANCELLED.value, 0),
         }
 
+    def pull_model(self, model: str) -> None:
+        """Ensure the given model is available (pulls if using real adapter and missing).
+
+        Safe no-op for StubAdapter. Useful before submitting jobs with use_real=True.
+        """
+        import asyncio
+
+        async def _pull():
+            await self.adapter.pull_model(model)
+
+        try:
+            asyncio.run(_pull())
+        except RuntimeError:
+            # Fallback if we're inside an existing event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_pull())
+            loop.close()
+
     def __enter__(self) -> "Hoglah":
         """Support `with Hoglah(...) as h:` for automatic cleanup."""
         return self

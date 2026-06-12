@@ -41,6 +41,10 @@ class BaseAdapter(ABC):
         """Return available models. Default empty; adapters should override."""
         return []
 
+    async def pull_model(self, model: str) -> None:
+        """Ensure the model is available (pull if missing). Default no-op."""
+        pass  # Stub does nothing; real adapter implements with ollama pull
+
 
 class StubAdapter(BaseAdapter):
     """
@@ -145,6 +149,9 @@ class OllamaAdapter(BaseAdapter):
         meta: dict[str, Any] = {}
         usage: dict[str, int] = {}
 
+        # Auto-pull if the model is not present (makes real mode much more ergonomic)
+        await self.pull_model(request.model)
+
         try:
             if request.messages:
                 # chat path
@@ -225,3 +232,14 @@ class OllamaAdapter(BaseAdapter):
                 if d:
                     result.append(d)
         return result
+
+    async def pull_model(self, model: str) -> None:
+        """Pull the model if it is not already present locally."""
+        client = self._get_client()
+        try:
+            await client.show(model=model)
+            return  # already present
+        except Exception:
+            pass  # not present, pull it
+        # Perform the pull (can be long-running; no stream for simplicity)
+        await client.pull(model=model)
