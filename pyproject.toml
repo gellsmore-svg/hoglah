@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoglah"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lightweight local-first job queue manager and Ollama wrapper for resource-constrained environments."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,14 +23,16 @@ keywords = [
     "background-tasks",
 ]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 dependencies = [
     "pydantic>=2.7",

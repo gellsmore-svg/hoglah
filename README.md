@@ -61,16 +61,31 @@ print(h.status(job_id))
 
 result = h.wait(job_id, timeout=120)
 print(result.output)
+
+# Recommended: context manager for auto cleanup of the background worker
+with Hoglah() as h:
+    job_id = h.submit(prompt="...", model="gemma3:1b")
+    print(h.wait(job_id).output)
 ```
 
-CLI (sketch):
+CLI:
 
 ```bash
-hoglah list --status queued,processing
-hoglah status <job-id>
+hoglah submit "Explain Hoglah" --model gemma3:1b --wait
+hoglah list --status completed
+hoglah ps --json                 # alias for list, machine-readable
+hoglah stats --json              # queue overview (counts by status)
+hoglah status <job-id> --json
 hoglah cancel <job-id>
 hoglah models
+hoglah run --real                # foreground worker using real Ollama
 ```
+
+By default `hoglah` and `Hoglah()` use the safe stub adapter (no LLM calls). Use `--real` (CLI) or pass `adapter=OllamaAdapter(...)` (library) when you want actual inference.
+
+`hoglah --version` / `-V` and `hoglah version` are supported. Use `with Hoglah(...) as h:` for automatic cleanup.
+
+CLI now also includes `hoglah ps` (list alias) and `--json` output on list/ps/status/models. `hoglah submit` supports `--metadata` (JSON) and `--parent-job-id`. Real integration tests are gated behind `RUN_OLLAMA_TESTS=1`.
 
 See `docs/requirements-v1.0.md` for the full initial specification.
 
@@ -107,15 +122,19 @@ job_id = hoglah.submit(
 
 ## Current Status
 
-**2026-06-12**: Initial requirements specification captured and project metadata scaffolded.
+**2026-06-12 (updated)**: Core implementation complete (Chunks 1-3 + follow-on polish).
 
-- `docs/requirements-v1.0.md` — verbatim initial spec
-- `docs/project-brief.md`
-- `docs/architecture-decisions.md` — early ADRs + open questions
-- `pyproject.toml` skeleton
-- Basic directory layout and registry updates
+- Full durable queue + background asyncio worker (concurrency=1 default)
+- Pluggable adapters: `StubAdapter` (default, safe) + `OllamaAdapter` (real, opt-in via `use_real=True` or `--real`)
+- `Hoglah(use_real=True)` convenience + `HOGLAH_USE_REAL_ADAPTER` env var
+- Submit (prompt **or** messages/chat), rich generation params, status, get, list, cancel, wait, named+direct callbacks
+- Restart recovery (interrupted jobs + callback re-delivery)
+- Truncation metadata always surfaced (never fails the job)
+- CLI: `list`, `status`, `cancel`, `submit` (with --messages, --temperature, --num-ctx etc.), `run`, `models`, `version`
+- `examples/basic_usage.py` demonstrating the common patterns
+- 13 passing tests. No real Ollama required (everything exercises safely via stub).
 
-No implementation code yet. Next work will focus on the core job lifecycle (submit → persistent queue → single-worker execution against Ollama → result + callback).
+See `docs/requirements-v1.0.md`, `docs/architecture-decisions.md`, and `.restart.md` for history and how to continue.
 
 See sister domains for style and quality references:
 - [Mahalath](https://github.com/gellsmore-svg/mahalath)

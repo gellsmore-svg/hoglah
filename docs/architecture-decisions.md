@@ -1,6 +1,6 @@
 # Architecture Decisions
 
-**Last updated**: 2026-06-12
+**Last updated**: 2026-06-12 (Chunk 3: adapter protocol + real impl + CLI surface complete)
 
 ADRs are append-only. If a decision is reversed, add a new ADR rather than editing the old one, and note the supersession in both entries.
 

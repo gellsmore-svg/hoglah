@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,6 +88,10 @@ class JobStore(Protocol):
 
     def close(self) -> None:
         """Release any resources (e.g. DB connection)."""
+        ...
+
+    def get_status_counts(self) -> dict[str, int]:
+        """Return dict of status -> count for quick queue overview."""
         ...
 
 
@@ -286,6 +289,14 @@ class SQLiteJobStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def get_status_counts(self) -> dict[str, int]:
+        """Return dict of status -> count for quick queue overview."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT status, COUNT(*) as c FROM jobs GROUP BY status"
+            ).fetchall()
+        return {row["status"]: row["c"] for row in rows}
 
 
 # Convenience factory (used by client)
