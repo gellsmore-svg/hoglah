@@ -310,6 +310,33 @@ def cancel(job_id: str, db: Path | None = typer.Option(None, "--db")) -> None:
 
 
 @app.command()
+def wait(
+    job_id: str = typer.Argument(..., help="Job ID to wait for"),
+    timeout: float | None = typer.Option(None, "--timeout", "-t", help="Max seconds to wait"),
+    db: Path | None = typer.Option(None, "--db"),
+) -> None:
+    """Block until the job reaches a terminal state, then print result (or error)."""
+    h = _get_hoglah(db)
+    try:
+        res = h.wait(job_id, timeout=timeout)
+        if res.status == JobStatus.COMPLETED:
+            if res.output:
+                print(res.output)
+            if res.truncated:
+                typer.secho(f"[note: truncated, reason={res.truncation_reason}]", fg=typer.colors.YELLOW)
+        else:
+            typer.secho(f"Job {res.status.value}", fg=typer.colors.YELLOW)
+            if res.error:
+                print("Error:", res.error)
+    except TimeoutError:
+        typer.secho(f"Timed out waiting for {job_id}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    except KeyError:
+        typer.secho(f"Job not found: {job_id}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+
+@app.command()
 def submit(
     prompt: str | None = typer.Argument(None, help="Prompt text (generate style). Provide --messages-json for chat style."),
     model: str = typer.Option(..., "--model", "-m", help="Model name, e.g. gemma3:1b, llama3.2"),
