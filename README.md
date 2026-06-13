@@ -34,6 +34,57 @@ Named after one of the daughters of Zelophehad (Numbers 26/27/36, Joshua 17), co
 - Non-Ollama backends
 - Real-time streaming UI surfaces (file + callback sufficient)
 
+## Installation
+
+### From PyPI (recommended once published)
+```bash
+pip install hoglah
+# With CLI
+pip install "hoglah[cli]"
+```
+
+### From GitHub Releases (immediate, no PyPI needed)
+After a release is published (via `git tag vX.Y.Z && git push --tags`):
+
+```bash
+# Latest wheel
+pip install "https://github.com/gellsmore-svg/hoglah/releases/latest/download/hoglah-*.whl"
+
+# Or specific version
+pip install "https://github.com/gellsmore-svg/hoglah/releases/download/v0.2.1/hoglah-0.2.1-py3-none-any.whl"
+```
+
+### From source (for development)
+```bash
+git clone https://github.com/gellsmore-svg/hoglah
+cd hoglah
+python -m venv .venv
+.venv/bin/pip install -e ".[dev,cli]"
+```
+
+### Publishing to PyPI (so `pip install hoglah` just works)
+
+The release workflow already builds the packages. To publish them to PyPI automatically on every `v*` tag:
+
+1. Go to https://pypi.org/manage/project/hoglah/ (create the project first if it doesn't exist by doing a manual upload once).
+2. Go to "Publishing" → "Add a trusted publisher".
+3. Choose **GitHub**.
+4. Fill in:
+   - **Repository**: `gellsmore-svg/hoglah`
+   - **Workflow**: `release.yml` (or leave blank to allow any workflow)
+   - **Environment**: (optional but recommended — create a GitHub Environment called `pypi` and select it here)
+5. Save.
+
+Then push a tag:
+```bash
+git tag v0.2.1
+git push origin v0.2.1
+```
+
+The release workflow will now publish to PyPI using OIDC (no API token required — this is the modern secure way).
+
+You can also do a one-time manual upload with `twine` if you prefer.
+
 ## Quick Start (Planned)
 
 Once implemented:
@@ -41,7 +92,7 @@ Once implemented:
 ```bash
 git clone https://github.com/gellsmore-svg/hoglah
 cd hoglah
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python -m venv .venv && .venv/bin/pip install -e ".[dev,cli]"
 ```
 
 ```python
