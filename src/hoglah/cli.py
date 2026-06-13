@@ -151,6 +151,32 @@ def stats(
 
 
 @app.command()
+def clear(
+    status: str | None = typer.Option(
+        None, "--status", "-s", help="Only clear jobs with this status (e.g. completed, failed)"
+    ),
+    older_than: int | None = typer.Option(
+        None, "--older-than", help="Only clear jobs last updated more than N days ago"
+    ),
+    db: Path | None = typer.Option(None, "--db"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Remove old or terminal jobs from the database (maintenance)."""
+    h = _get_hoglah(db)
+    st = JobStatus(status) if status else None
+    count = h.clear(status=st, older_than_days=older_than)
+    if count == 0:
+        print("No jobs matched the clear criteria.")
+        return
+    if not yes:
+        confirm = typer.confirm(f"Delete {count} job(s)?", default=False)
+        if not confirm:
+            typer.secho("Clear cancelled.", fg=typer.colors.YELLOW)
+            return
+    print(f"Cleared {count} job(s).")
+
+
+@app.command()
 def pull(
     model: str = typer.Argument(..., help="Model name to pull (e.g. gemma3:1b)"),
     real: bool = typer.Option(False, "--real", help="Use real Ollama (default is stub which does nothing)"),

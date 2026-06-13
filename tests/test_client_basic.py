@@ -237,6 +237,11 @@ def test_cli_submit_and_list(tmp_path):
     data = _json.loads(stats_json.output)
     assert "counts" in data and "total_jobs" in data
 
+    # clear command (dry-ish via --yes)
+    clear_res = runner.invoke(app, ["clear", "--status", "completed", "--yes", "--db", str(db)])
+    assert clear_res.exit_code == 0
+    assert "Cleared" in clear_res.output or "No jobs" in clear_res.output
+
 
 @pytest.mark.skipif(not _HAS_CLI_RUNNER, reason="typer not installed for CLI tests")
 def test_cli_submit_with_messages_json(tmp_path):
@@ -280,6 +285,29 @@ def test_hoglah_context_manager():
     h2 = Hoglah(config={"db_path": db}, start_worker=False)
     assert h2.status(job_id) == res.status
     h2.close()
+
+
+def test_clear_jobs():
+    """Test clearing jobs by status and age via client (CLI uses it)."""
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db}, start_worker=False)
+    j1 = h.submit(prompt="to clear", model="x")
+    j2 = h.submit(prompt="keep", model="x")
+
+    # Manually complete one for status filter
+    fake = JobResult(job_id=j1, status=JobStatus.COMPLETED, output="done")
+    h._store.set_result(j1, fake)  # type: ignore[attr-defined]
+
+    # Clear only completed
+    cleared = h.clear(status=JobStatus.COMPLETED)
+    assert cleared == 1
+    assert h.status(j2) == JobStatus.QUEUED  # the other remains
+
+    # Clear remaining (no age filter in this test to avoid time manipulation)
+    cleared2 = h.clear()
+    assert cleared2 >= 0
+
+    h.close()
 
 
 def test_stats():

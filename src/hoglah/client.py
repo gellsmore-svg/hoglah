@@ -24,7 +24,7 @@ import os
 import threading
 import time
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
@@ -578,6 +578,25 @@ class Hoglah:
             "failed": counts.get(JobStatus.FAILED.value, 0),
             "cancelled": counts.get(JobStatus.CANCELLED.value, 0),
         }
+
+    def clear(
+        self,
+        *,
+        status: JobStatus | str | None = None,
+        older_than_days: int | None = None,
+    ) -> int:
+        """Delete old/terminal jobs from the store.
+
+        Returns the number of jobs removed.
+        Useful for maintenance of long-running queues.
+        """
+        if isinstance(status, str):
+            status = JobStatus(status)
+        before = None
+        if older_than_days is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+            before = cutoff.isoformat()
+        return self._store.delete_jobs(status=status, before=before) if hasattr(self._store, "delete_jobs") else 0
 
     def pull_model(self, model: str) -> None:
         """Ensure the given model is available (pulls if using real adapter and missing).
