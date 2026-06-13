@@ -165,6 +165,12 @@ Hoglah 0.2.1 implements the full V1 specification from `docs/requirements-v1.0.m
 
 See the full requirements review and V1 completeness note in `.restart.md`.
 
+You can also run the packaged install smoke test after installing the wheel:
+```bash
+python scripts/test_packaged_install.py
+```
+(This is what we used to validate that `pip install hoglah-0.2.1-py3-none-any.whl[cli]` produces a fully working installation.)
+
 **Real Ollama:** Opt-in via `use_real=True` / `HOGLAH_USE_REAL_ADAPTER=1` / `--real`. Auto-pulls models, uses model info for context, reports real truncation/usage. A gated integration test exists (`RUN_OLLAMA_TESTS=1 pytest ...`). The vast majority of real paths are also covered by unit mocks.
 hoglah cancel <job-id>
 hoglah models
