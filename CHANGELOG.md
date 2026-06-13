@@ -8,8 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased / next]
 
 ### Added
-- `hoglah stats` CLI command (and `Hoglah.stats()`) for queue overview: status counts and totals. Supports `--json`.
-- Improved `OllamaAdapter` truncation reporting using real `done_reason == "length"` from Ollama responses (plus improved heuristics).
+- `hoglah show <model>` CLI and Hoglah.show_model() / adapter.show_model() for inspecting model details (context size, template, family, etc.).
+- `hoglah clear` (and Hoglah.clear) for pruning old/terminal jobs by status or age.
+- `hoglah info` (and Hoglah.info) for config/adapter/stats snapshot.
+- Configurable log_level (HOGLAH_LOG_LEVEL / config.log_level, default INFO).
+- --parent filter to list/ps, enriched --json with 'preview', dynamic PARENT column in human table.
+- Smart context handling in OllamaAdapter (uses show_model to auto-detect num_ctx, sets effective_num_ctx).
+- GitHub release workflow (.github/workflows/release.yml).
+- 20+ passing tests.
+
+### Changed
+- Improved list/ps human/JSON output for better DX and parent_job chaining visibility.
+- Real adapter now auto-pulls missing models and has smarter truncation/context support.
 
 ## [0.2.0] - 2026-06-12
 
