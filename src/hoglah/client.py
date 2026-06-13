@@ -19,12 +19,16 @@ Internally:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
@@ -162,11 +166,18 @@ class Hoglah:
         # Attempt restart callback re-delivery for jobs that completed while we were down
         self._redeliver_restart_callbacks()
 
-        # Recover any jobs that were PROCESSING when the previous process died
-        self._recover_interrupted_jobs()
+        # Recover any jobs that were PROCESSING when the previous process died.
+        # This is a WORKER responsibility (ADR-016): only an instance that runs
+        # the worker may re-queue interrupted jobs. A pure submitter
+        # (start_worker=False) sharing the queue with a separate worker daemon
+        # must NOT do this, or it would re-queue the daemon's in-flight jobs
+        # and cause double processing.
+        if start_worker:
+            self._recover_interrupted_jobs()
 
         # Start the background worker (asyncio loop in a daemon thread).
-        # Pass start_worker=False when you want to control execution manually (e.g. tests).
+        # Pass start_worker=False when you want to control execution manually (e.g. tests)
+        # or to act as a pure submitter into a shared queue (separate daemon executes).
         if start_worker:
             self._start_background_worker()
 
@@ -177,6 +188,7 @@ class Hoglah:
     def submit(
         self,
         *,
+        kind: str = "generate",
         prompt: str | None = None,
         messages: list[dict[str, Any]] | None = None,
         model: str,
@@ -184,7 +196,7 @@ class Hoglah:
         num_ctx: int | None = None,
         options: dict[str, Any] | None = None,
         callback: JobCallback | str | None = None,
-        # callback_url is V2 per non-goals
+        callback_url: str | None = None,  # outbound HTTP push on completion (ADR-015)
         tags: list[str] | None = None,
         priority: int = 0,
         timeout_seconds: int | None = None,
@@ -225,6 +237,7 @@ class Hoglah:
 
         # Build the persistable request
         req = normalize_request(
+            kind=kind,
             prompt=prompt,
             messages=messages,
             model=model,
@@ -247,6 +260,7 @@ class Hoglah:
             format=format,
             keep_alive=keep_alive,
             callback_key=callback_key,
+            callback_url=callback_url,
         )
 
         # Enqueue (store the request)
@@ -257,6 +271,43 @@ class Hoglah:
             self._direct_callbacks[job_id] = direct_cb
 
         return job_id
+
+    def submit_embedding(
+        self,
+        text: str,
+        *,
+        model: str,
+        callback: JobCallback | str | None = None,
+        callback_url: str | None = None,
+        tags: list[str] | None = None,
+        priority: int = 0,
+        timeout_seconds: int | None = None,
+        max_retries: int = 2,
+        metadata: dict[str, Any] | None = None,
+        parent_job_id: str | None = None,
+        **extra: Any,
+    ) -> str:
+        """Submit an embedding job. Returns the job ID immediately.
+
+        Convenience wrapper over submit(kind="embed"): the input text is
+        carried in `prompt` and the worker routes it to adapter.embed(); the
+        resulting JobResult has `embedding` / `embedding_dim` set and `output`
+        is None.
+        """
+        return self.submit(
+            kind="embed",
+            prompt=text,
+            model=model,
+            callback=callback,
+            callback_url=callback_url,
+            tags=tags,
+            priority=priority,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            metadata=metadata,
+            parent_job_id=parent_job_id,
+            **extra,
+        )
 
     def get(self, job_id: str) -> JobResult:
         """Return a JobResult for the job (works for any status).
@@ -288,6 +339,8 @@ class Hoglah:
                 truncation_reason=res.get("truncation_reason"),
                 estimated_prompt_tokens=res.get("estimated_prompt_tokens"),
                 effective_num_ctx=res.get("effective_num_ctx"),
+                embedding=res.get("embedding"),
+                embedding_dim=res.get("embedding_dim"),
             )
 
         # Non-terminal or no result yet: synthesize a minimal JobResult
@@ -351,6 +404,7 @@ class Hoglah:
             error="Cancelled by user",
         )
         self._store.set_result(job_id, result)
+        self._deliver(result)
         return True
 
     def wait(self, job_id: str, timeout: float | None = None) -> JobResult:
@@ -494,6 +548,9 @@ class Hoglah:
             # Persist final result
             self._store.set_result(job_id, result)
 
+            # Out-of-band delivery for decoupled submitters (output file; H3 callback)
+            self._deliver(result, request)
+
             # Fire callback (direct if present for this process, else via registry)
             self._fire_callback(job_id, result, callback_key)
 
@@ -508,6 +565,7 @@ class Hoglah:
                     model=getattr(request, "model", None) if "request" in locals() else None,
                 )
                 self._store.set_result(job_id, err_result)
+                self._deliver(err_result, request if "request" in locals() else None)
             except Exception:
                 pass
         finally:
@@ -524,18 +582,36 @@ class Hoglah:
         """
         max_retries = getattr(request, "max_retries", 2) or 2
         _timeout = getattr(request, "timeout_seconds", None)
+        is_embed = getattr(request, "kind", "generate") == "embed"
 
         last_error = None
         timed_out = False
         for attempt in range(max_retries + 1):
             try:
                 if _timeout is not None and _timeout > 0:
-                    output, usage, meta = await asyncio.wait_for(
-                        self._call_ollama(request), timeout=_timeout
+                    payload = await asyncio.wait_for(
+                        self._dispatch(request), timeout=_timeout
                     )
                 else:
-                    output, usage, meta = await self._call_ollama(request)
-                # Success (even if internally truncated)
+                    payload = await self._dispatch(request)
+                if is_embed:
+                    vector, usage, meta = payload
+                    return JobResult(
+                        job_id=job_id,
+                        status=JobStatus.COMPLETED,
+                        model=request.model,
+                        parameters=asdict(request),
+                        usage=usage,
+                        timings={"finished_at": datetime.now(timezone.utc)},
+                        tags=request.tags or [],
+                        metadata={**(request.metadata or {}), **meta},
+                        parent_job_id=request.parent_job_id,
+                        estimated_prompt_tokens=usage.get("prompt_tokens"),
+                        embedding=vector,
+                        embedding_dim=meta.get("embedding_dim") or len(vector),
+                    )
+                # Generation: success (even if internally truncated)
+                output, usage, meta = payload
                 return JobResult(
                     job_id=job_id,
                     status=JobStatus.COMPLETED,
@@ -585,6 +661,14 @@ class Hoglah:
             parent_job_id=request.parent_job_id,
         )
 
+    async def _dispatch(self, req: JobRequest) -> tuple[Any, dict[str, int], dict[str, Any]]:
+        """Route a request to the adapter by kind: embeddings to embed(),
+        everything else to run(). Both return (payload, usage, metadata) where
+        payload is a vector for embeddings or output text for generation."""
+        if getattr(req, "kind", "generate") == "embed":
+            return await self.adapter.embed(req)
+        return await self._call_ollama(req)
+
     async def _call_ollama(self, req: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
         """
         Delegate to the configured adapter (Stub by default; OllamaAdapter for real).
@@ -614,6 +698,78 @@ class Hoglah:
                 logger.exception("Callback for job %s failed (ignored)", job_id)
             # Clean direct callback after firing
             self._direct_callbacks.pop(job_id, None)
+
+    def _deliver(self, result: JobResult, request: JobRequest | None = None) -> None:
+        """Out-of-band delivery of a terminal result for decoupled submitters.
+
+        Two independent mechanisms, both best-effort (a delivery failure must
+        never change the job's persisted terminal status):
+        - ADR-014: if `output_dir` is configured, write the full result to
+          `<output_dir>/<job_id>.json` atomically (so a poller never reads a
+          partial file).
+        - ADR-015: if the request carries a `callback_url`, POST the result
+          JSON to it. The output file (when configured) is the natural
+          fallback if the push fails.
+        """
+        payload = json.dumps(asdict(result), default=str)
+
+        out_dir = self.config.output_dir
+        if out_dir is not None:
+            try:
+                dest = Path(out_dir) / f"{result.job_id}.json"
+                tmp = dest.with_suffix(".json.tmp")
+                tmp.write_text(payload, encoding="utf-8")
+                os.replace(tmp, dest)  # atomic on the same filesystem
+            except Exception:
+                logger.exception("Failed to write output file for job %s", result.job_id)
+
+        callback_url = getattr(request, "callback_url", None) if request is not None else None
+        if callback_url:
+            # Deliver on a daemon thread so a slow/unreachable endpoint and its
+            # retry backoff never block the async worker loop (or cancel()'s
+            # caller). The output file remains the durable fallback.
+            threading.Thread(
+                target=self._post_callback,
+                args=(callback_url, result.job_id, payload),
+                daemon=True,
+                name=f"hoglah-callback-{result.job_id[:8]}",
+            ).start()
+
+    def _post_callback(self, url: str, job_id: str, payload: str) -> None:
+        """POST `payload` (a serialized JobResult) to `url`, retrying transient
+        failures with exponential backoff. Best-effort: gives up after
+        `callback_max_retries` attempts and logs — the output file (if any) is
+        the fallback path for the submitter."""
+        attempts = self.config.callback_max_retries
+        timeout = self.config.callback_timeout_seconds
+        data = payload.encode("utf-8")
+        last_err: str | None = None
+        for attempt in range(attempts):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    if 200 <= resp.status < 300:
+                        logger.debug("Callback for job %s delivered to %s", job_id, url)
+                        return
+                    last_err = f"HTTP {resp.status}"
+            except urllib.error.HTTPError as exc:
+                # 4xx is unlikely to succeed on retry; stop early. 5xx may be transient.
+                last_err = f"HTTP {exc.code}"
+                if 400 <= exc.code < 500:
+                    break
+            except Exception as exc:
+                last_err = str(exc)
+            if attempt < attempts - 1:
+                time.sleep(min(2 ** attempt, 8))
+        logger.warning(
+            "Callback POST to %s failed for job %s after %d attempt(s): %s",
+            url, job_id, attempts, last_err,
+        )
 
     def _recover_interrupted_jobs(self) -> None:
         """On startup, deal with jobs that were left in PROCESSING state."""

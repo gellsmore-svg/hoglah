@@ -13,6 +13,8 @@ The BaseAdapter protocol also exposes list_models() for discovery.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import math
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -36,6 +38,15 @@ class BaseAdapter(ABC):
         metadata can carry "truncated", "truncation_reason", etc.
         """
         raise NotImplementedError
+
+    async def embed(self, request: JobRequest) -> tuple[list[float], dict[str, int], dict[str, Any]]:
+        """Embed `request.prompt` and return (vector, usage, metadata).
+
+        Default raises: adapters that cannot embed (the protocol is
+        generation-first) should not silently return a bogus vector. The
+        worker only calls this for kind="embed" jobs.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support embedding jobs")
 
     async def list_models(self) -> list[dict[str, Any]]:
         """Return available models. Default empty; adapters should override."""
@@ -98,6 +109,20 @@ class StubAdapter(BaseAdapter):
         }
 
         return output, usage, meta
+
+    async def embed(self, request: JobRequest) -> tuple[list[float], dict[str, int], dict[str, Any]]:
+        """Deterministic fake embedding: a fixed-length unit-ish vector derived
+        from a hash of the input text. Stable across runs (good for tests),
+        always finite, never touches Ollama."""
+        await asyncio.sleep(0.01)
+        text = request.prompt or ""
+        dim = 8
+        # Derive `dim` floats in [-1, 1] from a stable digest of the text.
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        vector = [((digest[i % len(digest)] / 127.5) - 1.0) for i in range(dim)]
+        usage = {"prompt_tokens": len(text.split()), "completion_tokens": 0, "total": len(text.split())}
+        meta = {"embedding_dim": dim, "stub": True}
+        return vector, usage, meta
 
     async def list_models(self) -> list[dict[str, Any]]:
         return [
@@ -258,6 +283,43 @@ class OllamaAdapter(BaseAdapter):
             # Let the caller (client._execute_with_retries) classify as transient/permanent
             # and decide on retries / final failure. We re-raise so error path is exercised.
             raise
+
+    async def embed(self, request: JobRequest) -> tuple[list[float], dict[str, int], dict[str, Any]]:
+        """Embed `request.prompt` via Ollama's `/api/embed` (client.embed).
+
+        Returns (vector, usage, metadata). Raises (for the worker's retry /
+        failure path) if the model returns no usable vector or a non-finite
+        value — a numerical-instability quirk some embedding models hit on
+        particular inputs, which callers must not mistake for a real vector.
+        """
+        client = self._get_client()
+        text = request.prompt or ""
+        # Auto-pull keeps real mode ergonomic, matching the generate path.
+        await self.pull_model(request.model)
+
+        resp = await client.embed(model=request.model, input=text)
+        # EmbedResponse exposes .embeddings (list[list[float]]); accept dict too.
+        embeddings = getattr(resp, "embeddings", None)
+        if embeddings is None and isinstance(resp, dict):
+            embeddings = resp.get("embeddings") or (
+                [resp["embedding"]] if resp.get("embedding") else None
+            )
+        if not embeddings or not embeddings[0]:
+            raise RuntimeError(f"Ollama embed returned no vector for {request.model}")
+
+        vector = [float(x) for x in embeddings[0]]
+        if any(not math.isfinite(x) for x in vector):
+            raise RuntimeError(
+                f"{request.model} produced a non-finite embedding (model numerical instability)"
+            )
+
+        prompt_tokens = int(
+            getattr(resp, "prompt_eval_count", 0)
+            or (resp.get("prompt_eval_count", 0) if isinstance(resp, dict) else 0)
+        )
+        usage = {"prompt_tokens": prompt_tokens, "completion_tokens": 0, "total": prompt_tokens}
+        meta = {"embedding_dim": len(vector)}
+        return vector, usage, meta
 
     async def list_models(self) -> list[dict[str, Any]]:
         client = self._get_client()
