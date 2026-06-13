@@ -280,6 +280,16 @@ def test_cli_submit_and_list(tmp_path):
     assert wait_res.exit_code != 0
     assert "not found" in (wait_res.output or "").lower() or "timed out" in (wait_res.output or "").lower()
 
+    # wait with --json (errors before full output, but command accepts flag)
+    wait_json = runner.invoke(app, ["wait", "nonexistent", "--json", "--timeout", "0.1", "--db", str(db)])
+    assert wait_json.exit_code != 0
+
+    # rm with --json
+    rm_json = runner.invoke(app, ["rm", "nonexistent", "--json", "--yes", "--db", str(db)])
+    assert rm_json.exit_code != 0
+    j = _json.loads(rm_json.output)
+    assert j.get("removed") is False
+
     # show model
     show_res = runner.invoke(app, ["show", "stub-test:1b", "--db", str(db)])
     assert show_res.exit_code == 0

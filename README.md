@@ -79,7 +79,7 @@ hoglah info --json               # config + adapter + log_level + stats snapshot
 hoglah show gemma3:1b --json     # model details (context, template, etc.)
 hoglah clear --status completed --older-than 7 --yes  # prune old jobs
 hoglah rm <job-id> --yes  # remove specific job
-hoglah wait <job-id> --timeout 60  # block until done
+hoglah wait <job-id> --timeout 60 --json  # block until done, machine readable
 hoglah status <job-id> --json
 hoglah cancel <job-id>
 hoglah models
