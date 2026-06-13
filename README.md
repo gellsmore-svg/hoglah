@@ -81,6 +81,40 @@ hoglah clear --status completed --older-than 7 --yes  # prune old jobs
 hoglah rm <job-id> --yes  # remove specific job
 hoglah wait <job-id> --timeout 60 --json  # block until done, machine readable
 hoglah status <job-id> --json
+
+## V1 Scope
+
+Hoglah 0.2.1 implements the full V1 specification from `docs/requirements-v1.0.md` and `docs/project-brief.md`.
+
+**Included (V1):**
+- Submit (prompt or messages/chat), immediate UUID.
+- Status, get result (with output, usage, timings, metadata, parent, **truncated** reporting + effective_num_ctx).
+- List (status, tags, **parent_job_id** filters; rich human + --json with preview).
+- Cancel (best-effort).
+- Wait (standalone or via submit --wait).
+- rm / clear (per-job or bulk by status/age).
+- info / stats (config, adapter, queue overview).
+- Models: list + show (details, context size, template, family).
+- pull (auto on real submit, or explicit).
+- run (foreground worker).
+- In-process callbacks (direct + named registry for restart re-delivery).
+- Restart recovery (interrupted jobs + callback re-delivery).
+- Pluggable adapters (safe Stub default + real Ollama with auto-pull, model-aware context, truncation via done_reason).
+- Configurable concurrency (default 1), log_level, db, ollama host.
+- Full submit surface (temperature, top_p/k, num_ctx, format, keep_alive, metadata, parent, etc.).
+- Persistence (SQLite), context manager, --json everywhere.
+
+**Explicitly not in V1 (per non-goals):**
+- Web UI / HTTP server (V2).
+- Webhooks / callback_url.
+- Distributed / multi-node.
+- Non-Ollama backends.
+- Complex dependency graph execution (parent_job_id is for traceability only; no automatic waiting/fan-out).
+- Real-time streaming UI (polling wait + final callbacks sufficient).
+
+See the full requirements review and V1 completeness note in `.restart.md`.
+
+**Real Ollama:** Opt-in via `use_real=True` / `HOGLAH_USE_REAL_ADAPTER=1` / `--real`. Auto-pulls models, uses model info for context, reports real truncation/usage. A gated integration test exists (`RUN_OLLAMA_TESTS=1 pytest ...`). The vast majority of real paths are also covered by unit mocks.
 hoglah cancel <job-id>
 hoglah models
 hoglah run --real                # foreground worker using real Ollama
