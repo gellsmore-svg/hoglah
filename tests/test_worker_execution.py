@@ -20,6 +20,8 @@ from hoglah import Hoglah, JobStatus
 from hoglah.adapters import BaseAdapter, OllamaAdapter, StubAdapter
 from hoglah.models import JobRequest, JobResult
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 # Marker for real Ollama integration tests.
 # Run with: RUN_OLLAMA_TESTS=1 pytest -m ollama  (or just the tests when server is up)
 requires_ollama = pytest.mark.skipif(
@@ -245,3 +247,57 @@ def test_ollama_adapter_build_options_maps_params():
     assert opts["num_ctx"] == 8192
     assert opts["seed"] == 42
     assert opts["num_predict"] == 128
+
+
+def test_ollama_adapter_show_model_mocked():
+    """OllamaAdapter.show_model uses client.show and returns details."""
+    with patch("hoglah.adapters.ollama.AsyncClient") as mock_client_class:
+        mock_client = MagicMock()
+        mock_client.show = AsyncMock(return_value={"name": "test:1b", "details": {"family": "test"}, "parameters": "num_ctx 4096"})
+        mock_client_class.return_value = mock_client
+
+        ad = OllamaAdapter(host="http://example")
+        details = asyncio.run(ad.show_model("test:1b"))
+        assert details["name"] == "test:1b"
+        mock_client.show.assert_called_once_with(model="test:1b")
+
+
+def test_ollama_adapter_pull_model_mocked():
+    """OllamaAdapter.pull_model calls show (if present) or pull."""
+    with patch("hoglah.adapters.ollama.AsyncClient") as mock_client_class:
+        mock_client = MagicMock()
+        mock_client.show = AsyncMock()  # succeeds -> no pull
+        mock_client.pull = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        ad = OllamaAdapter()
+        asyncio.run(ad.pull_model("test:1b"))
+        mock_client.show.assert_called()
+        mock_client.pull.assert_not_called()
+
+
+def test_ollama_adapter_run_uses_model_context_mocked():
+    """OllamaAdapter.run calls show_model to get num_ctx and passes to generate."""
+    with patch("hoglah.adapters.ollama.AsyncClient") as mock_client_class:
+        mock_client = MagicMock()
+        # show returns model with num_ctx
+        mock_client.show = AsyncMock(return_value={"parameters": "num_ctx 8192"})
+        # generate returns response
+        mock_resp = MagicMock()
+        mock_resp.response = "ok"
+        mock_resp.prompt_eval_count = 10
+        mock_resp.eval_count = 5
+        mock_resp.done_reason = "stop"
+        mock_client.generate = AsyncMock(return_value=mock_resp)
+        mock_client_class.return_value = mock_client
+
+        ad = OllamaAdapter()
+        req = JobRequest(prompt="hi", model="test:1b", num_ctx=None)
+        output, usage, meta = asyncio.run(ad.run(req))
+
+        assert output == "ok"
+        # should have used 8192 from model
+        call_kwargs = mock_client.generate.call_args.kwargs
+        assert call_kwargs["options"]["num_ctx"] == 8192
+        assert meta.get("effective_num_ctx") == 8192
+        assert meta.get("done_reason") == "stop"
