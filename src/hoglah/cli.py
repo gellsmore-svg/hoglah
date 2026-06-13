@@ -292,8 +292,10 @@ def doctor(
 
     use_real = real or os.environ.get("HOGLAH_USE_REAL_ADAPTER") == "1"
     cfg = {}
-    if db: cfg["db_path"] = db
-    if ollama_host: cfg["ollama_host"] = ollama_host
+    if db:
+        cfg["db_path"] = db
+    if ollama_host:
+        cfg["ollama_host"] = ollama_host
 
     try:
         h = Hoglah(config=cfg, use_real=use_real, start_worker=False)
@@ -309,6 +311,8 @@ def doctor(
 
     if use_real:
         print("\nReal adapter checks (llama.cpp via Ollama):")
+        effective_host = ollama_host or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+        print(f"  Effective host: {effective_host}")
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -320,7 +324,7 @@ def doctor(
         except Exception as e:
             typer.secho(f"  Connectivity issue: {e}", fg=typer.colors.RED)
             print("  Tip: Ensure Ollama is running and listening (OLLAMA_HOST or default :11434)")
-            print("  In WSL: make sure it's bound to 0.0.0.0 if needed from other contexts.")
+            print("  In WSL: set OLLAMA_HOST=0.0.0.0 (export or setx) before starting ollama serve if needed for other contexts.")
 
     print("\nDoctor complete.")
 

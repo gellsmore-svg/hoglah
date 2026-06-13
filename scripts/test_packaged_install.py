@@ -15,19 +15,22 @@ Usage example (stub, always works):
     /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
 
 With your local working Ollama / llama.cpp (for full V1 real-path validation of the packaged wheel):
+    # On your machine (in the env where Claude + Ollama work):
+    # First, to make Ollama listen broadly (in your WSL):
+    #   setx OLLAMA_HOST "0.0.0.0"   # Windows side, or in WSL shell: export OLLAMA_HOST=0.0.0.0 before starting ollama serve
+    # Then:
     RUN_OLLAMA_TESTS=1 /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
 
     # or
     HOGLAH_USE_REAL_ADAPTER=1 /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
 
-The script will automatically switch to a real model (defaults to gemma3:1b; edit the script if needed) and exercise
-the real adapter paths (show_model, pull if needed, context auto-detection from model info, full submit + wait,
-parent jobs, etc.) using the *installed* package.
+The script will automatically switch to a real model (defaults to gemma3:1b; edit if needed) and exercise
+the real adapter paths using the *installed* package.
 
-Also run the gated pytest for deeper integration:
+Also run the gated test:
     RUN_OLLAMA_TESTS=1 python -m pytest tests/test_worker_execution.py::test_real_ollama_adapter_end_to_end -q -s --tb=long
 
-Please run on your machine (where Ollama/llama.cpp works) and share the full output.
+Please run on your machine and share the full output (this is how we validate the packaged version with real llama.cpp).
 """
 
 from __future__ import annotations
