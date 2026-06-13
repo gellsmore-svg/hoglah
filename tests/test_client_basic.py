@@ -290,6 +290,12 @@ def test_cli_submit_and_list(tmp_path):
     j = _json.loads(rm_json.output)
     assert j.get("removed") is False
 
+    # doctor command
+    doctor_res = runner.invoke(app, ["doctor", "--db", str(db)])
+    assert doctor_res.exit_code == 0
+    assert "Hoglah Doctor" in doctor_res.output
+    assert "StubAdapter" in doctor_res.output or "adapter" in doctor_res.output.lower()
+
     # show model
     show_res = runner.invoke(app, ["show", "stub-test:1b", "--db", str(db)])
     assert show_res.exit_code == 0

@@ -279,6 +279,53 @@ def pull(
 
 
 @app.command()
+def doctor(
+    db: Path | None = typer.Option(None, "--db"),
+    real: bool = typer.Option(False, "--real", help="Check real Ollama connectivity"),
+    ollama_host: str | None = typer.Option(None, "--ollama-host"),
+) -> None:
+    """Diagnose Hoglah setup and connectivity (useful for real Ollama/llama.cpp)."""
+    import os
+    print("Hoglah Doctor")
+    print("-" * 30)
+    print(f"Version: {__version__}")
+
+    use_real = real or os.environ.get("HOGLAH_USE_REAL_ADAPTER") == "1"
+    cfg = {}
+    if db: cfg["db_path"] = db
+    if ollama_host: cfg["ollama_host"] = ollama_host
+
+    try:
+        h = Hoglah(config=cfg, use_real=use_real, start_worker=False)
+        i = h.info()
+        print(f"Adapter: {i['adapter']}")
+        print(f"DB: {i['config']['db_path']}")
+        print(f"Log level: {i['config'].get('log_level', 'INFO')}")
+        print(f"Concurrency: {i['config']['concurrency']}")
+        print("Instance created OK.")
+    except Exception as e:
+        typer.secho(f"Failed to create Hoglah: {e}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    if use_real:
+        print("\nReal adapter checks (llama.cpp via Ollama):")
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            models = loop.run_until_complete(h.adapter.list_models())
+            loop.close()
+            print(f"  Reachable. {len(models)} model(s) visible.")
+            if models:
+                print(f"  Example: {models[0].get('name')}")
+        except Exception as e:
+            typer.secho(f"  Connectivity issue: {e}", fg=typer.colors.RED)
+            print("  Tip: Ensure Ollama is running and listening (OLLAMA_HOST or default :11434)")
+            print("  In WSL: make sure it's bound to 0.0.0.0 if needed from other contexts.")
+
+    print("\nDoctor complete.")
+
+
+@app.command()
 def status(
     job_id: str,
     db: Path | None = typer.Option(None, "--db"),
