@@ -24,6 +24,7 @@ class HoglahSettings(BaseSettings):
         HOGLAH_DB_PATH=~/.hoglah/hoglah.db
         HOGLAH_CONCURRENCY=1
         HOGLAH_OLLAMA_HOST=http://localhost:11434
+        HOGLAH_LOG_LEVEL=INFO
 
     Constructor overrides take precedence over env / defaults.
     """
@@ -53,6 +54,12 @@ class HoglahSettings(BaseSettings):
         description="Ollama server URL. If None, the official ollama client defaults are used (usually http://localhost:11434).",
     )
 
+    # Logging (ADR-007 / DX)
+    log_level: str = Field(
+        default="INFO",
+        description="Logging level for the 'hoglah' logger (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
+    )
+
     @field_validator("db_path", mode="before")
     @classmethod
     def _expand_db_path(cls, v: Any) -> Path:
@@ -71,6 +78,7 @@ class HoglahSettings(BaseSettings):
             "db_path": str(self.db_path),
             "concurrency": self.concurrency,
             "ollama_host": self.ollama_host,
+            "log_level": self.log_level,
         }
 
 
