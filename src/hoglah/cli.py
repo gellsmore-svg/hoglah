@@ -434,6 +434,42 @@ def models(
         print(f"{name}{size_str}")
 
 
+@app.command()
+def show(
+    model: str = typer.Argument(..., help="Model name to inspect (e.g. gemma3:1b)"),
+    db: Path | None = typer.Option(None, "--db", help="Override database path"),
+    real: bool = typer.Option(False, "--real", help="Query real Ollama server"),
+    ollama_host: str | None = typer.Option(None, "--ollama-host"),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of human text"),
+) -> None:
+    """Show details for a model (context size, template, etc.)."""
+    h = _get_hoglah(db, real=real, ollama_host=ollama_host)
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        details = loop.run_until_complete(h.adapter.show_model(model))
+        loop.close()
+    except Exception as exc:
+        typer.secho(f"Failed to show model {model}: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    if json_out:
+        print(json.dumps(details, indent=2, default=str))
+        return
+
+    print(f"Model: {details.get('name') or details.get('model') or model}")
+    for key in ("size", "digest", "parameters", "template"):
+        if key in details:
+            val = details[key]
+            if isinstance(val, dict):
+                print(f"{key}: {val}")
+            else:
+                print(f"{key}: {val}")
+    if "details" in details:
+        print(f"details: {details['details']}")
+
+
 def main() -> None:
     """Entry point for the console script."""
     app()
