@@ -610,6 +610,14 @@ class Hoglah:
             before = cutoff.isoformat()
         return self._store.delete_jobs(status=status, before=before) if hasattr(self._store, "delete_jobs") else 0
 
+    def remove(self, job_id: str) -> bool:
+        """Delete a job by ID. Returns True if a job was removed.
+        Works for any status (best-effort).
+        """
+        if hasattr(self._store, "delete_job"):
+            return self._store.delete_job(job_id)
+        return False
+
     def info(self) -> dict[str, Any]:
         """Return a snapshot of the instance: config, adapter type, and current stats.
 

@@ -225,6 +225,26 @@ def clear(
     print(f"Cleared {count} job(s).")
 
 
+@app.command("rm")
+def rm_job(
+    job_id: str = typer.Argument(..., help="Job ID to remove"),
+    db: Path | None = typer.Option(None, "--db"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Remove a specific job by ID (maintenance)."""
+    h = _get_hoglah(db)
+    if not yes:
+        confirm = typer.confirm(f"Delete job {job_id}?", default=False)
+        if not confirm:
+            typer.secho("Cancelled.", fg=typer.colors.YELLOW)
+            return
+    if h.remove(job_id):
+        typer.secho(f"Removed {job_id}", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"Job not found: {job_id}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+
 @app.command()
 def pull(
     model: str = typer.Argument(..., help="Model name to pull (e.g. gemma3:1b)"),
