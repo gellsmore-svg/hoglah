@@ -258,7 +258,7 @@ def test_cli_submit_and_list(tmp_path):
     info_json = runner.invoke(app, ["info", "--json", "--db", str(db)])
     assert info_json.exit_code == 0
     j = _json.loads(info_json.output)
-    assert "adapter" in j and "stats" in j
+    assert "version" in j and "adapter" in j and "stats" in j
 
     # clear command (dry-ish via --yes)
     clear_res = runner.invoke(app, ["clear", "--status", "completed", "--yes", "--db", str(db)])
@@ -378,6 +378,7 @@ def test_info():
 
     i = h.info()
     assert i["adapter"] == "StubAdapter"
+    assert "version" in i
     assert i["config"]["concurrency"] == 2
     assert i["stats"]["total_jobs"] == 1
     assert "db_path" in i["config"]
