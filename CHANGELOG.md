@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- (none yet)
+
+## [0.2.2] - 2026-06-13
+
 ### Fixed
 - **Sync facades now work inside a running event loop.** `Hoglah.show_model()`
   and `pull_model()` used a `try asyncio.run() except RuntimeError ->
@@ -19,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "bound to a different event loop" when reused from another (every sync
   facade call spins a fresh loop). Now cached per-loop and recreated when the
   running loop changes.
+- **`timeout_seconds` is now enforced (ADR-011).** It was stored but ignored;
+  a stuck generation could hold a worker slot forever. Each attempt is now
+  bounded by `asyncio.wait_for`; on expiry the job is marked FAILED (terminal,
+  not retried) with `metadata.timed_out = True`, and the in-flight call is
+  cancelled, freeing the slot.
+
+### Changed
+- **Graceful worker shutdown.** In-flight jobs are now tracked and drained
+  within a bounded window on `close()` (under the existing 3s thread join)
+  instead of having their event loop destroyed mid-request; stragglers are
+  cancelled so a terminal result is still recorded.
 
 ### Validated
 - **First real end-to-end inference confirmed** against a live Ollama

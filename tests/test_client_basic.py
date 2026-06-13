@@ -488,3 +488,42 @@ def test_sync_facade_callable_from_running_event_loop():
         assert isinstance(details, dict)
     finally:
         h.close()
+
+
+def test_timeout_seconds_marks_job_failed_without_retry():
+    """ADR-011: timeout_seconds caps each attempt and marks the job FAILED
+    (terminal, not retried), cancelling the in-flight call. Uses a slow
+    StubAdapter subclass — no Ollama needed."""
+    import asyncio
+    import time
+
+    from hoglah.adapters import StubAdapter
+
+    class _SlowAdapter(StubAdapter):
+        attempts = 0
+
+        async def run(self, request):
+            type(self).attempts += 1
+            await asyncio.sleep(5)  # longer than the 1s timeout
+            return await super().run(request)
+
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db}, adapter=_SlowAdapter(), start_worker=True)
+    try:
+        job_id = h.submit(
+            prompt="hi", model="stub", timeout_seconds=1, max_retries=3,
+        )
+        deadline = time.time() + 15
+        res = h.get(job_id)
+        while res.status not in (JobStatus.COMPLETED, JobStatus.FAILED):
+            if time.time() > deadline:
+                raise AssertionError("job did not reach terminal state")
+            time.sleep(0.2)
+            res = h.get(job_id)
+        assert res.status == JobStatus.FAILED
+        assert "timed out" in (res.error or "").lower()
+        assert res.metadata.get("timed_out") is True
+        # Despite max_retries=3, a timeout must NOT be retried.
+        assert _SlowAdapter.attempts == 1
+    finally:
+        h.close()

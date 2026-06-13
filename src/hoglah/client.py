@@ -40,6 +40,10 @@ from .store import JobStore, create_sqlite_store
 
 logger = logging.getLogger("hoglah")
 
+# Bounded window for in-flight jobs to finish on shutdown, kept under
+# close()'s 3.0s worker-thread join so the join still succeeds.
+_SHUTDOWN_DRAIN_SECONDS = 2.0
+
 
 def _run_async(coro_factory):
     """Run an async coroutine to completion from synchronous code, whether
@@ -433,6 +437,10 @@ class Hoglah:
     async def _worker_loop(self) -> None:
         sem = asyncio.Semaphore(self.config.concurrency)
         poll_interval = 0.5
+        # Track in-flight job tasks so shutdown can drain them instead of
+        # destroying the loop mid-generation. (Jobs are already time-bounded
+        # by timeout_seconds; this just lets near-done ones finish cleanly.)
+        inflight: set[asyncio.Task] = set()
 
         while self._worker_running:
             try:
@@ -444,7 +452,9 @@ class Hoglah:
                     job_id = row["id"]
                     # Acquire slot and process (fire and forget the task)
                     await sem.acquire()
-                    asyncio.create_task(self._process_job(job_id, sem))
+                    task = asyncio.create_task(self._process_job(job_id, sem))
+                    inflight.add(task)
+                    task.add_done_callback(inflight.discard)
 
                 await asyncio.sleep(poll_interval)
             except asyncio.CancelledError:
@@ -452,6 +462,17 @@ class Hoglah:
             except Exception:
                 logger.exception("Error in worker loop")
                 await asyncio.sleep(1.0)
+
+        # Graceful drain on shutdown: let in-flight jobs finish within a
+        # bounded window (under close()'s 3s thread-join), then cancel any
+        # stragglers so set_result still records a terminal state.
+        pending = {t for t in inflight if not t.done()}
+        if pending:
+            done, still = await asyncio.wait(pending, timeout=_SHUTDOWN_DRAIN_SECONDS)
+            for t in still:
+                t.cancel()
+            if still:
+                await asyncio.gather(*still, return_exceptions=True)
 
     async def _process_job(self, job_id: str, sem: asyncio.Semaphore) -> None:
         """Claim and execute one job. Release semaphore on exit."""
@@ -493,14 +514,27 @@ class Hoglah:
             sem.release()
 
     async def _execute_with_retries(self, job_id: str, request: JobRequest) -> JobResult:
-        """Run the Ollama call, with simple retry for transient errors."""
+        """Run the Ollama call, with simple retry for transient errors.
+
+        `timeout_seconds` (ADR-011) caps each attempt's wall-clock time and,
+        on expiry, marks the job FAILED without retry — the budget is the
+        whole point, so retrying would defeat it. `asyncio.wait_for` also
+        cancels the in-flight generation, freeing the worker slot rather
+        than leaking it to a stuck model.
+        """
         max_retries = getattr(request, "max_retries", 2) or 2
-        _timeout = getattr(request, "timeout_seconds", None)  # respected by caller / adapter if needed
+        _timeout = getattr(request, "timeout_seconds", None)
 
         last_error = None
+        timed_out = False
         for attempt in range(max_retries + 1):
             try:
-                output, usage, meta = await self._call_ollama(request)
+                if _timeout is not None and _timeout > 0:
+                    output, usage, meta = await asyncio.wait_for(
+                        self._call_ollama(request), timeout=_timeout
+                    )
+                else:
+                    output, usage, meta = await self._call_ollama(request)
                 # Success (even if internally truncated)
                 return JobResult(
                     job_id=job_id,
@@ -518,6 +552,14 @@ class Hoglah:
                     estimated_prompt_tokens=usage.get("prompt_tokens"),
                     effective_num_ctx=meta.get("effective_num_ctx") or request.num_ctx,
                 )
+            except asyncio.TimeoutError:
+                # ADR-011: timeout_seconds marks the job failed (terminal,
+                # not retried). Caught before the generic handler so it is
+                # never misread as a transient error and retried.
+                timed_out = True
+                last_error = f"Timed out after {_timeout}s (timeout_seconds)"
+                logger.warning("Job %s timed out after %ss", job_id, _timeout)
+                break
             except Exception as exc:
                 last_error = str(exc)
                 is_transient = self._is_transient_error(exc)
@@ -539,7 +581,7 @@ class Hoglah:
             error=last_error or "Unknown execution error",
             parameters=asdict(request),
             tags=request.tags or [],
-            metadata=request.metadata or {},
+            metadata={**(request.metadata or {}), **({"timed_out": True} if timed_out else {})},
             parent_job_id=request.parent_job_id,
         )
 
