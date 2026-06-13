@@ -197,7 +197,7 @@ def test_cli_submit_and_list(tmp_path):
     assert ps_res.exit_code == 0
     assert "JOB_ID" in ps_res.output or "completed" in ps_res.output.lower()
 
-    # JSON output for list
+    # JSON output for list (now includes 'preview' for usability)
     json_res = runner.invoke(app, ["list", "--json", "--limit", "2", "--db", str(db)])
     assert json_res.exit_code == 0
     assert '"job_id"' in json_res.output or '"status"' in json_res.output
@@ -205,6 +205,7 @@ def test_cli_submit_and_list(tmp_path):
     import json as _json
     data = _json.loads(json_res.output)
     assert isinstance(data, list) and len(data) >= 1
+    assert "preview" in data[0]
 
     # New submit flags (metadata + parent_job_id) + ps already covered above
     meta_submit = runner.invoke(
@@ -334,25 +335,17 @@ def test_show_model():
 
 
 def test_context_from_model_info():
-    """Real adapter (via stub sim) and submit set effective_num_ctx from model details if not specified."""
-    db = _temp_db()
-    h = Hoglah(config={"db_path": db}, start_worker=False)
-    job_id = h.submit(prompt="context test", model="stub-test:1b", max_retries=0)
-    # Simulate worker execution by directly calling adapter (since start_worker=False)
+    """Stub adapter (simulating real) sets effective_num_ctx from model details if not specified."""
     import asyncio
     from hoglah.adapters import StubAdapter
     ad = StubAdapter()
-    req = h._store.get(job_id)["request"]  # internal for test
-    # but easier: use the execute path? For simplicity, call show and check client result after manual
-    # Actually, since worker not run, manually set a result with meta
-    # Better: use the adapter directly in test
+    # Use the adapter directly in test to exercise meta/effective_num_ctx
     loop = asyncio.new_event_loop()
     output, usage, meta = loop.run_until_complete(ad.run(
         type('Req', (), {"prompt": "hi", "messages": None, "model": "stub-test:1b", "num_ctx": None, **{k:None for k in ['system_prompt','options','tags','priority','timeout_seconds','max_retries','metadata','parent_job_id','temperature','top_p','top_k','repeat_penalty','seed','stop','num_predict','format','keep_alive','callback_key']}})()
     ))
     loop.close()
     assert meta.get("effective_num_ctx") == 4096  # from stub show
-    h.close()
 
 
 def test_info():

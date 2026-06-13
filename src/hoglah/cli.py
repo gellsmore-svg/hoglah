@@ -53,7 +53,9 @@ def _cli(
 
 
 def _result_to_dict(res: JobResult) -> dict:
-    """Convert JobResult to JSON-serializable dict (handle enums, datetimes)."""
+    """Convert JobResult to JSON-serializable dict (handle enums, datetimes).
+    Adds a 'preview' field for quick scripting (output or error snippet).
+    """
     d = asdict(res)
     d["status"] = res.status.value
     timings = d.get("timings") or {}
@@ -61,6 +63,15 @@ def _result_to_dict(res: JobResult) -> dict:
         if v is not None and hasattr(v, "isoformat"):
             timings[k] = v.isoformat()
     d["timings"] = timings
+
+    # Add useful preview for JSON consumers
+    if res.error:
+        preview = "ERROR: " + res.error[:120]
+    elif res.output:
+        preview = res.output[:120] + ("..." if len(res.output) > 120 else "")
+    else:
+        preview = ""
+    d["preview"] = preview
     return d
 
 
@@ -111,12 +122,23 @@ def list_jobs(
         return
 
     # Simple aligned output (no extra dependencies)
-    print(f"{'JOB_ID':<38}  {'STATUS':<12}  {'MODEL':<18}  TAGS")
-    print("-" * 80)
-    for j in jobs:
-        model = (j.model or "?")[:18]
-        tags = ",".join(j.tags) if j.tags else "-"
-        print(f"{j.job_id:<38}  {j.status.value:<12}  {model:<18}  {tags}")
+    # Include PARENT column if any jobs have a parent (for chaining visibility)
+    has_parent = any(j.parent_job_id for j in jobs)
+    if has_parent:
+        print(f"{'JOB_ID':<38}  {'STATUS':<12}  {'MODEL':<18}  {'PARENT':<12}  TAGS")
+        print("-" * 92)
+        for j in jobs:
+            model = (j.model or "?")[:18]
+            parent = (j.parent_job_id or "")[:12] if j.parent_job_id else "-"
+            tags = ",".join(j.tags) if j.tags else "-"
+            print(f"{j.job_id:<38}  {j.status.value:<12}  {model:<18}  {parent:<12}  {tags}")
+    else:
+        print(f"{'JOB_ID':<38}  {'STATUS':<12}  {'MODEL':<18}  TAGS")
+        print("-" * 80)
+        for j in jobs:
+            model = (j.model or "?")[:18]
+            tags = ",".join(j.tags) if j.tags else "-"
+            print(f"{j.job_id:<38}  {j.status.value:<12}  {model:<18}  {tags}")
 
 
 @app.command("ps", help="List recent jobs (ps alias, like process listing).")
