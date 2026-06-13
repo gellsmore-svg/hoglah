@@ -36,22 +36,23 @@ Named after one of the daughters of Zelophehad (Numbers 26/27/36, Joshua 17), co
 
 ## Installation
 
-### From PyPI (recommended once published)
+### From PyPI (recommended)
 ```bash
 pip install hoglah
-# With CLI
+# With the CLI
 pip install "hoglah[cli]"
 ```
+Hoglah is published on PyPI: https://pypi.org/project/hoglah/
 
-### From GitHub Releases (immediate, no PyPI needed)
-After a release is published (via `git tag vX.Y.Z && git push --tags`):
+### From GitHub Releases (no PyPI needed)
+Every `vX.Y.Z` tag publishes a GitHub Release with a wheel + sdist:
 
 ```bash
 # Latest wheel
-pip install "https://github.com/gellsmore-svg/hoglah/releases/latest/download/hoglah-*.whl"
+pip install "hoglah[cli] @ https://github.com/gellsmore-svg/hoglah/releases/latest/download/hoglah-0.2.2-py3-none-any.whl"
 
-# Or specific version
-pip install "https://github.com/gellsmore-svg/hoglah/releases/download/v0.2.1/hoglah-0.2.1-py3-none-any.whl"
+# Or a specific version
+pip install "hoglah[cli] @ https://github.com/gellsmore-svg/hoglah/releases/download/v0.2.2/hoglah-0.2.2-py3-none-any.whl"
 ```
 
 ### From source (for development)
@@ -62,28 +63,18 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev,cli]"
 ```
 
-### Publishing to PyPI (so `pip install hoglah` just works)
+### Maintainers: releasing
 
-The release workflow already builds the packages. To publish them to PyPI automatically on every `v*` tag:
+Releases are automated. Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`,
+which builds the wheel + sdist, creates the GitHub Release, and publishes to PyPI
+via OIDC trusted publishing (no API token stored). PyPI trusted publishing is
+already configured for this repo (publisher: `gellsmore-svg/hoglah`, workflow
+`release.yml`, no environment). So a release is just:
 
-1. Go to https://pypi.org/manage/project/hoglah/ (create the project first if it doesn't exist by doing a manual upload once).
-2. Go to "Publishing" → "Add a trusted publisher".
-3. Choose **GitHub**.
-4. Fill in:
-   - **Repository**: `gellsmore-svg/hoglah`
-   - **Workflow**: `release.yml` (or leave blank to allow any workflow)
-   - **Environment**: (optional but recommended — create a GitHub Environment called `pypi` and select it here)
-5. Save.
-
-Then push a tag:
 ```bash
-git tag v0.2.1
-git push origin v0.2.1
+# bump version in pyproject.toml + update CHANGELOG, commit, then:
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
-
-The release workflow will now publish to PyPI using OIDC (no API token required — this is the modern secure way).
-
-You can also do a one-time manual upload with `twine` if you prefer.
 
 ## Quick Start (Planned)
 
@@ -178,27 +169,23 @@ RUN_OLLAMA_TESTS=1 python scripts/test_packaged_install.py
 HOGLAH_USE_REAL_ADAPTER=1 python scripts/test_packaged_install.py
 ```
 
-(This is the recommended way to thoroughly test the packaged v0.2.1 with real Ollama.)
-
 **Real Ollama / llama.cpp:** Opt-in via `use_real=True` / `HOGLAH_USE_REAL_ADAPTER=1` / `--real`. The "real" adapter talks to Ollama (which uses llama.cpp for inference).
 
-**Important:** In this agent's tool execution environment, localhost:11434 is not reachable, so real-Ollama calls and `RUN_OLLAMA_TESTS=1` have failed here. All "tests green" and packaged validation in this development session used the safe StubAdapter + mocks.
-
-**To validate the packaged v0.2.1 wheel with your working local Ollama/llama.cpp (strongly recommended before tagging):**
+**Real-Ollama validation status:** v0.2.2 has been validated end-to-end against a live Ollama (submit → worker → real inference, plus the gated integration test and the packaged-wheel smoke test in real mode). To reproduce on your machine:
 ```bash
 python3 -m venv /tmp/hoglah-validate
-/tmp/hoglah-validate/bin/pip install dist/hoglah-0.2.1-py3-none-any.whl[cli]
+/tmp/hoglah-validate/bin/pip install "hoglah[cli]"            # from PyPI
 RUN_OLLAMA_TESTS=1 /tmp/hoglah-validate/bin/python scripts/test_packaged_install.py
 
-# Also run the gated integration test
-RUN_OLLAMA_TESTS=1 python -m pytest tests/test_worker_execution.py::test_real_ollama_adapter_end_to_end -q -s --tb=long
+# Or the gated integration test from a source checkout
+RUN_OLLAMA_TESTS=1 python -m pytest tests/test_worker_execution.py::test_real_ollama_adapter_end_to_end -q -s
 ```
 
-Run the above on your machine (the same WSL cello env where Claude + your Ollama/llama.cpp work) and share the output. The smoke test script and gated test were built precisely for this real-backend validation of the packaged artifact.
-
-To make Ollama listen on all interfaces (if needed for cross-context access in WSL):
-- Windows cmd: `setx OLLAMA_HOST "0.0.0.0"` (then restart `ollama serve`)
-- Or in WSL shell before starting: `export OLLAMA_HOST=0.0.0.0`
+**WSL2 note:** if Ollama runs as the Windows binary and your code runs in WSL, the daemon is *not* reachable at `localhost` over HTTP. Set `OLLAMA_HOST=0.0.0.0` on the Windows side (`setx OLLAMA_HOST "0.0.0.0"`, then restart Ollama) and point the client at the WSL2 gateway IP, e.g.:
+```bash
+OLLAMA_HOST="http://$(ip route show default | awk '{print $3}'):11434" \
+  RUN_OLLAMA_TESTS=1 python scripts/test_packaged_install.py
+```
 hoglah cancel <job-id>
 hoglah models
 hoglah run --real                # foreground worker using real Ollama
@@ -255,7 +242,7 @@ job_id = hoglah.submit(
 - Truncation metadata always surfaced (never fails the job)
 - CLI: `list`, `status`, `cancel`, `submit` (with --messages, --temperature, --num-ctx etc.), `run`, `models`, `version`
 - `examples/basic_usage.py` demonstrating the common patterns
-- 13 passing tests. No real Ollama required (everything exercises safely via stub).
+- 26 passing tests (+1 gated real-Ollama test that passes against a live server); the default suite needs no Ollama (stub adapter).
 
 See `docs/requirements-v1.0.md`, `docs/architecture-decisions.md`, and `.restart.md` for history and how to continue.
 
