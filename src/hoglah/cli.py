@@ -101,6 +101,7 @@ def version() -> None:
 @app.command("list")
 def list_jobs(
     status: str | None = typer.Option(None, "--status", "-s", help="Filter by status (queued,processing,completed,...)"),
+    parent: str | None = typer.Option(None, "--parent", "-p", help="Filter by parent job ID"),
     limit: int = typer.Option(20, "--limit", "-l"),
     db: Path | None = typer.Option(None, "--db", help="Override database path"),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of human text"),
@@ -108,7 +109,7 @@ def list_jobs(
     """List recent jobs."""
     h = _get_hoglah(db)
     st = JobStatus(status) if status else None
-    jobs = h.list(status=st, limit=limit)
+    jobs = h.list(status=st, parent_job_id=parent, limit=limit)
     if not jobs:
         if json_out:
             print("[]")
@@ -144,12 +145,13 @@ def list_jobs(
 @app.command("ps", help="List recent jobs (ps alias, like process listing).")
 def ps_jobs(
     status: str | None = typer.Option(None, "--status", "-s", help="Filter by status (queued,processing,completed,...)"),
+    parent: str | None = typer.Option(None, "--parent", "-p", help="Filter by parent job ID"),
     limit: int = typer.Option(20, "--limit", "-l"),
     db: Path | None = typer.Option(None, "--db", help="Override database path"),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of human text"),
 ) -> None:
     """Alias for 'list' (convenience for queue 'ps')."""
-    list_jobs(status=status, limit=limit, db=db, json_out=json_out)
+    list_jobs(status=status, parent=parent, limit=limit, db=db, json_out=json_out)
 
 
 @app.command()

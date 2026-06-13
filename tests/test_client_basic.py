@@ -60,6 +60,14 @@ def test_list_and_filter():
     assert len(a_jobs) == 1
     assert a_jobs[0].job_id == j1
 
+    # parent filter
+    p1 = h.submit(prompt="parent1", model="gemma:2b")
+    c1 = h.submit(prompt="child1", model="gemma:2b", parent_job_id=p1)
+    c2 = h.submit(prompt="child2", model="gemma:2b", parent_job_id=p1)
+    parent_filtered = h.list(parent_job_id=p1)
+    assert len(parent_filtered) == 2
+    assert all(j.parent_job_id == p1 for j in parent_filtered)
+
 
 def test_cancel_and_wait_timeout():
     db = _temp_db()
@@ -206,6 +214,10 @@ def test_cli_submit_and_list(tmp_path):
     data = _json.loads(json_res.output)
     assert isinstance(data, list) and len(data) >= 1
     assert "preview" in data[0]
+
+    # parent filter in list (CLI)
+    p_res = runner.invoke(app, ["list", "--parent", "some-parent", "--json", "--db", str(db)])
+    assert p_res.exit_code == 0  # even if no match, should not error
 
     # New submit flags (metadata + parent_job_id) + ps already covered above
     meta_submit = runner.invoke(

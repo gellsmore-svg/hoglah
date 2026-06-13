@@ -281,13 +281,14 @@ class Hoglah:
         *,
         status: JobStatus | str | None = None,
         tags: list[str] | None = None,
+        parent_job_id: str | None = None,
         limit: int = 100,
     ) -> list[JobResult]:
         """List recent jobs (lightweight view)."""
         if isinstance(status, str):
             status = JobStatus(status)
 
-        rows = self._store.list(status=status, tags=tags, limit=limit)
+        rows = self._store.list(status=status, tags=tags, parent_job_id=parent_job_id, limit=limit)
         results: list[JobResult] = []
         for row in rows:
             results.append(self.get(row["id"]))
