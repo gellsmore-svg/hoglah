@@ -78,6 +78,7 @@ hoglah stats --json              # queue overview (counts by status)
 hoglah info --json               # config + adapter + log_level + stats snapshot
 hoglah show gemma3:1b --json     # model details (context, template, etc.)
 hoglah clear --status completed --older-than 7 --yes  # prune old jobs
+hoglah rm <job-id> --yes  # remove specific job
 hoglah status <job-id> --json
 hoglah cancel <job-id>
 hoglah models

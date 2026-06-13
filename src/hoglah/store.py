@@ -104,6 +104,10 @@ class JobStore(Protocol):
         """Delete jobs matching filters. Returns number deleted."""
         ...
 
+    def delete_job(self, job_id: str) -> bool:
+        """Delete a single job by ID. Returns True if a job was deleted."""
+        ...
+
 
 class SQLiteJobStore:
     """SQLite-backed JobStore (default implementation).
@@ -336,6 +340,13 @@ class SQLiteJobStore:
             cur = self._conn.execute(query, params)
             self._conn.commit()
         return cur.rowcount
+
+    def delete_job(self, job_id: str) -> bool:
+        """Delete a single job by ID. Returns True if a job was deleted."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            self._conn.commit()
+        return cur.rowcount > 0
 
 
 # Convenience factory (used by client)

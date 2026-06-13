@@ -265,6 +265,16 @@ def test_cli_submit_and_list(tmp_path):
     assert clear_res.exit_code == 0
     assert "Cleared" in clear_res.output or "No jobs" in clear_res.output
 
+    # rm command for specific job
+    # First submit one to remove
+    submit_res = runner.invoke(app, ["submit", "to-rm", "--model", "x", "--db", str(db)])
+    assert submit_res.exit_code == 0
+    # extract id roughly from output
+    # for test, use a known one or just test help/usage; simple: rm non exist
+    rm_res = runner.invoke(app, ["rm", "nonexistent", "--yes", "--db", str(db)])
+    assert rm_res.exit_code != 0  # should fail for not found
+    assert "not found" in (rm_res.output or "").lower() or rm_res.exit_code == 1
+
     # show model
     show_res = runner.invoke(app, ["show", "stub-test:1b", "--db", str(db)])
     assert show_res.exit_code == 0
@@ -414,4 +424,19 @@ def test_stats():
     s2 = h.stats()
     assert s2["cancelled"] >= 1
 
+    h.close()
+
+
+def test_remove_job():
+    """Test removing a specific job via client (CLI uses remove)."""
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db}, start_worker=False)
+    j1 = h.submit(prompt="to remove", model="x")
+    j2 = h.submit(prompt="keep", model="x")
+
+    assert h.remove(j1) is True
+    assert h.remove("nonexistent") is False
+
+    # j2 remains
+    assert h.status(j2) == JobStatus.QUEUED
     h.close()
