@@ -45,6 +45,10 @@ class BaseAdapter(ABC):
         """Ensure the model is available (pull if missing). Default no-op."""
         pass  # Stub does nothing; real adapter implements with ollama pull
 
+    async def show_model(self, model: str) -> dict[str, Any]:
+        """Return details for a specific model (from ollama show or stub). Default empty."""
+        return {}
+
 
 class StubAdapter(BaseAdapter):
     """
@@ -98,6 +102,16 @@ class StubAdapter(BaseAdapter):
             {"name": "stub-model:1b", "size": 123456, "digest": "stub", "details": {"family": "stub"}},
             {"name": "stub-model:7b", "size": 4567890, "digest": "stub", "details": {"family": "stub"}},
         ]
+
+    async def show_model(self, model: str) -> dict[str, Any]:
+        return {
+            "name": model,
+            "size": 123456,
+            "digest": "stub",
+            "details": {"family": "stub", "parameter_size": "1B", "quantization_level": "Q4_0"},
+            "parameters": "num_ctx 4096",
+            "template": "{{ .System }} {{ .Prompt }}",
+        }
 
 
 class OllamaAdapter(BaseAdapter):
@@ -243,3 +257,17 @@ class OllamaAdapter(BaseAdapter):
             pass  # not present, pull it
         # Perform the pull (can be long-running; no stream for simplicity)
         await client.pull(model=model)
+
+    async def show_model(self, model: str) -> dict[str, Any]:
+        client = self._get_client()
+        resp = await client.show(model=model)
+        if isinstance(resp, dict):
+            return resp
+        # Convert object to dict
+        d = {}
+        for attr in ("name", "model", "size", "digest", "details", "parameters", "template", "modified_at"):
+            if hasattr(resp, attr):
+                d[attr] = getattr(resp, attr)
+            elif isinstance(resp, dict) and attr in resp:
+                d[attr] = resp[attr]
+        return d or {"name": model}

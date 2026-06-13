@@ -252,6 +252,16 @@ def test_cli_submit_and_list(tmp_path):
     assert clear_res.exit_code == 0
     assert "Cleared" in clear_res.output or "No jobs" in clear_res.output
 
+    # show model
+    show_res = runner.invoke(app, ["show", "stub-test:1b", "--db", str(db)])
+    assert show_res.exit_code == 0
+    assert "stub-test:1b" in show_res.output or "parameters" in show_res.output.lower()
+
+    show_json = runner.invoke(app, ["show", "stub-test:1b", "--json", "--db", str(db)])
+    assert show_json.exit_code == 0
+    j = _json.loads(show_json.output)
+    assert "parameters" in j or "template" in j or "details" in j
+
 
 @pytest.mark.skipif(not _HAS_CLI_RUNNER, reason="typer not installed for CLI tests")
 def test_cli_submit_with_messages_json(tmp_path):
@@ -312,6 +322,15 @@ def test_log_level_config():
     assert logging.getLogger("hoglah").level == logging.ERROR
     h2.close()
     del os.environ["HOGLAH_LOG_LEVEL"]
+
+
+def test_show_model():
+    """show_model via client and stub adapter."""
+    h = Hoglah(config={"db_path": _temp_db()}, start_worker=False)
+    details = h.show_model("stub-test:1b")
+    assert "name" in details or "model" in details
+    assert "parameters" in details or "template" in details
+    h.close()
 
 
 def test_info():

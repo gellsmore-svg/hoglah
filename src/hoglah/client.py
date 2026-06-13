@@ -639,6 +639,25 @@ class Hoglah:
             loop.run_until_complete(_pull())
             loop.close()
 
+    def show_model(self, model: str) -> dict[str, Any]:
+        """Return details for a model (via adapter.show_model).
+
+        Useful for inspecting context size, template, etc. (especially with real adapter).
+        """
+        import asyncio
+
+        async def _show():
+            return await self.adapter.show_model(model)
+
+        try:
+            return asyncio.run(_show())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(_show())
+            loop.close()
+            return result
+
     def __enter__(self) -> "Hoglah":
         """Support `with Hoglah(...) as h:` for automatic cleanup."""
         return self
