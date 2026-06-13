@@ -58,6 +58,7 @@ class JobStore(Protocol):
         *,
         status: JobStatus | None = None,
         tags: list[str] | None = None,
+        parent_job_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -216,6 +217,7 @@ class SQLiteJobStore:
         *,
         status: JobStatus | None = None,
         tags: list[str] | None = None,
+        parent_job_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -232,6 +234,11 @@ class SQLiteJobStore:
             for tag in tags:
                 where_clauses.append("tags_json LIKE ?")
                 params.append(f'%"{tag}"%')
+
+        if parent_job_id:
+            # Crude JSON contains for parent in request_json (consistent with tags)
+            where_clauses.append("request_json LIKE ?")
+            params.append(f'%"parent_job_id": "{parent_job_id}"%')
 
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
