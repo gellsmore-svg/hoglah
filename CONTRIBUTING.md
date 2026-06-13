@@ -8,6 +8,30 @@ This file records the working conventions for collaboration between the operator
 - **a maintainer** — typically runs with elevated privileges in the environment and handles `git push` to the remote when needed.
 - **Claude / other agents** — implement, document, and propose within the operator's stated direction. Commit locally; do not assume push rights.
 
+## Agent commit attribution
+
+When an agent (a reviewer, Claude, etc.) does the bulk of the implementation work for a set of changes, include a `Co-authored-by` trailer in the commit message. This ensures the agent's contribution is properly credited on GitHub (the trailer is what GitHub uses to display co-authors, even when the primary `Author` of the commit is the human operator/a maintainer).
+
+**For a reviewer (xAI):**
+```
+Co-authored-by: a reviewer <code@x.ai>
+```
+
+Example commit message body:
+
+```
+feat: add graceful shutdown and timeout enforcement
+
+- ... summary of changes ...
+- Verified real Ollama end-to-end with gateway host.
+
+Co-authored-by: a reviewer <code@x.ai>
+```
+
+- The human operator remains the `Author` on the commit.
+- a maintainer (or operator) performs the actual `git push`.
+- This convention applies starting from the next agent-driven work.
+
 ## Restart-doc discipline (highly recommended for long-running work)
 
 Two files carry project state across sessions:
