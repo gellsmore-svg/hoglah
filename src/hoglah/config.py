@@ -54,6 +54,27 @@ class HoglahSettings(BaseSettings):
         description="Ollama server URL. If None, the official ollama client defaults are used (usually http://localhost:11434).",
     )
 
+    # Result delivery — output folder (ADR-014). When set, the worker writes
+    # each terminal job's full result to `<output_dir>/<job_id>.json` so a
+    # decoupled submitter (e.g. a separate process feeding the shared queue)
+    # can poll for it. None = disabled.
+    output_dir: Path | None = Field(
+        default=None,
+        description="If set, terminal job results are written to <output_dir>/<job_id>.json for polling. Dir created if needed.",
+    )
+
+    # Outbound callback delivery (ADR-015). Applied to per-job callback_url POSTs.
+    callback_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="Per-attempt timeout for outbound callback_url POSTs.",
+    )
+    callback_max_retries: int = Field(
+        default=3,
+        ge=1,
+        description="Number of attempts for an outbound callback POST before giving up (output file remains as fallback).",
+    )
+
     # Logging (ADR-007 / DX)
     log_level: str = Field(
         default="INFO",
@@ -68,9 +89,18 @@ class HoglahSettings(BaseSettings):
             return p
         return v
 
+    @field_validator("output_dir", mode="before")
+    @classmethod
+    def _expand_output_dir(cls, v: Any) -> Any:
+        if isinstance(v, (str, os.PathLike)):
+            return Path(v).expanduser()
+        return v
+
     def ensure_dirs(self) -> None:
-        """Create parent directory for db_path if it doesn't exist."""
+        """Create parent directory for db_path (and output_dir if set)."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.output_dir is not None:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a serializable view (useful for debugging / result metadata)."""
@@ -78,6 +108,7 @@ class HoglahSettings(BaseSettings):
             "db_path": str(self.db_path),
             "concurrency": self.concurrency,
             "ollama_host": self.ollama_host,
+            "output_dir": str(self.output_dir) if self.output_dir else None,
             "log_level": self.log_level,
         }
 

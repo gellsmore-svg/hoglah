@@ -10,6 +10,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.3.0] - 2026-06-13
+
+### Added
+- **Embedding jobs (ADR-013).** A first-class job `kind` (`generate` | `embed`).
+  `kind="embed"` carries the input text in `prompt`, the worker routes it to
+  `adapter.embed()` (Ollama `/api/embed`), and the result carries
+  `embedding: list[float]` + `embedding_dim` (with `output=None`). Non-finite
+  vectors (NaN/Inf — a known instability in some models like bge-m3) raise
+  rather than returning a bogus vector. `StubAdapter.embed` returns a
+  deterministic finite vector so the default/test path needs no server.
+  Convenience: `Hoglah.submit_embedding(text, model=...)`.
+- **Output-folder result delivery (ADR-014).** Optional `output_dir` config
+  (env `HOGLAH_OUTPUT_DIR`); the worker writes each terminal job's full result
+  to `<output_dir>/<job_id>.json` atomically (temp + `os.replace`) so a poller
+  never reads a partial file. Lets a decoupled submitter collect results
+  without sharing the worker's in-process callbacks. `None` (default) =
+  disabled.
+- **Outbound HTTP callback delivery (ADR-015).** Optional per-job
+  `callback_url` on `submit()` / `submit_embedding()`; on terminal status the
+  worker POSTs the result JSON to it (daemon thread; retries with backoff;
+  4xx stops early; failure leaves the output file as fallback). Generic — any
+  caller supplies its own URL. Stdlib `urllib` only, no new dependency.
+  **Supersedes the prior "no webhooks / callback_url is V2" non-goal.**
+  Config: `callback_max_retries` (3), `callback_timeout_seconds` (10).
+
+### Changed
+- **Interrupted-job recovery is now a worker responsibility (ADR-016).** Only
+  `start_worker=True` instances run `_recover_interrupted_jobs()`. This makes
+  the shared-queue topology safe: a pure submitter (`start_worker=False`)
+  feeding a separate worker daemon no longer re-queues the daemon's in-flight
+  jobs on construction.
+
 ## [0.2.2] - 2026-06-13
 
 ### Fixed

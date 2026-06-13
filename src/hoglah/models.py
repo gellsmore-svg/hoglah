@@ -49,6 +49,13 @@ class JobResult:
     estimated_prompt_tokens: int | None = None
     effective_num_ctx: int | None = None
 
+    # Embedding jobs (ADR-013). For kind="embed" the result carries the vector
+    # here instead of text in `output`; `output` stays None. `embedding_dim` is
+    # len(embedding), recorded so vectors from different models are never
+    # compared by accident.
+    embedding: list[float] | None = None
+    embedding_dim: int | None = None
+
 
 @dataclass
 class JobRequest:
@@ -58,6 +65,11 @@ class JobRequest:
     generation params (temperature etc.) are kept separate from the raw
     `options` dict so the worker can apply them cleanly.
     """
+
+    # Job kind (ADR-013): "generate" (prompt/chat -> text) or "embed"
+    # (prompt holds the input text -> embedding vector). Kept as a plain str
+    # so older persisted requests without the field default cleanly.
+    kind: str = "generate"
 
     prompt: str | None = None
     messages: list[dict[str, Any]] | None = None
@@ -85,6 +97,11 @@ class JobRequest:
 
     # Callback handling (ADR-006)
     callback_key: str | None = None  # if using named registry instead of direct callable
+
+    # Outbound HTTP callback (ADR-015). If set, the worker POSTs the terminal
+    # JobResult (as JSON) to this URL — lets a decoupled submitter be pushed
+    # the result instead of (or alongside) polling the output folder.
+    callback_url: str | None = None
 
 
 # Type alias for user callbacks (can be passed directly to submit or via registry)
