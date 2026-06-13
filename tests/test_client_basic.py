@@ -237,6 +237,16 @@ def test_cli_submit_and_list(tmp_path):
     data = _json.loads(stats_json.output)
     assert "counts" in data and "total_jobs" in data
 
+    # info command
+    info_res = runner.invoke(app, ["info", "--db", str(db)])
+    assert info_res.exit_code == 0
+    assert "StubAdapter" in info_res.output or "adapter" in info_res.output.lower()
+
+    info_json = runner.invoke(app, ["info", "--json", "--db", str(db)])
+    assert info_json.exit_code == 0
+    j = _json.loads(info_json.output)
+    assert "adapter" in j and "stats" in j
+
     # clear command (dry-ish via --yes)
     clear_res = runner.invoke(app, ["clear", "--status", "completed", "--yes", "--db", str(db)])
     assert clear_res.exit_code == 0
@@ -285,6 +295,21 @@ def test_hoglah_context_manager():
     h2 = Hoglah(config={"db_path": db}, start_worker=False)
     assert h2.status(job_id) == res.status
     h2.close()
+
+
+def test_info():
+    """Test Hoglah.info() snapshot and CLI."""
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db, "concurrency": 2}, start_worker=False)
+    h.submit(prompt="info test", model="x")
+
+    i = h.info()
+    assert i["adapter"] == "StubAdapter"
+    assert i["config"]["concurrency"] == 2
+    assert i["stats"]["total_jobs"] == 1
+    assert "db_path" in i["config"]
+
+    h.close()
 
 
 def test_clear_jobs():
