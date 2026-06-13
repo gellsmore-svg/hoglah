@@ -231,6 +231,7 @@ def rm_job(
     job_id: str = typer.Argument(..., help="Job ID to remove"),
     db: Path | None = typer.Option(None, "--db"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON result instead of human text"),
 ) -> None:
     """Remove a specific job by ID (maintenance)."""
     h = _get_hoglah(db)
@@ -239,7 +240,13 @@ def rm_job(
         if not confirm:
             typer.secho("Cancelled.", fg=typer.colors.YELLOW)
             return
-    if h.remove(job_id):
+    removed = h.remove(job_id)
+    if json_out:
+        print(json.dumps({"job_id": job_id, "removed": removed}, indent=2))
+        if not removed:
+            raise typer.Exit(1)
+        return
+    if removed:
         typer.secho(f"Removed {job_id}", fg=typer.colors.GREEN)
     else:
         typer.secho(f"Job not found: {job_id}", fg=typer.colors.RED)
@@ -314,11 +321,15 @@ def wait(
     job_id: str = typer.Argument(..., help="Job ID to wait for"),
     timeout: float | None = typer.Option(None, "--timeout", "-t", help="Max seconds to wait"),
     db: Path | None = typer.Option(None, "--db"),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON result instead of human text"),
 ) -> None:
     """Block until the job reaches a terminal state, then print result (or error)."""
     h = _get_hoglah(db)
     try:
         res = h.wait(job_id, timeout=timeout)
+        if json_out:
+            print(json.dumps(_result_to_dict(res), indent=2, default=str))
+            return
         if res.status == JobStatus.COMPLETED:
             if res.output:
                 print(res.output)
