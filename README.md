@@ -179,7 +179,21 @@ HOGLAH_USE_REAL_ADAPTER=1 python scripts/test_packaged_install.py
 
 (This is the recommended way to thoroughly test the packaged v0.2.1 with real Ollama.)
 
-**Real Ollama:** Opt-in via `use_real=True` / `HOGLAH_USE_REAL_ADAPTER=1` / `--real`. Auto-pulls models, uses model info for context, reports real truncation/usage. A gated integration test exists (`RUN_OLLAMA_TESTS=1 pytest ...`). The vast majority of real paths are also covered by unit mocks.
+**Real Ollama / llama.cpp:** Opt-in via `use_real=True` / `HOGLAH_USE_REAL_ADAPTER=1` / `--real`. The "real" adapter talks to Ollama (which uses llama.cpp for inference).
+
+**Important:** In this agent's tool execution environment, localhost:11434 is not reachable, so real-Ollama calls and `RUN_OLLAMA_TESTS=1` have failed here. All "tests green" and packaged validation in this development session used the safe StubAdapter + mocks.
+
+**To validate the packaged v0.2.1 wheel with your working local Ollama/llama.cpp (strongly recommended before tagging):**
+```bash
+python3 -m venv /tmp/hoglah-validate
+/tmp/hoglah-validate/bin/pip install dist/hoglah-0.2.1-py3-none-any.whl[cli]
+RUN_OLLAMA_TESTS=1 /tmp/hoglah-validate/bin/python scripts/test_packaged_install.py
+
+# Also run the gated integration test
+RUN_OLLAMA_TESTS=1 python -m pytest tests/test_worker_execution.py::test_real_ollama_adapter_end_to_end -q -s --tb=long
+```
+
+Run the above on your machine (the same WSL cello env where Claude + your Ollama/llama.cpp work) and share the output. The smoke test script and gated test were built precisely for this real-backend validation of the packaged artifact.
 hoglah cancel <job-id>
 hoglah models
 hoglah run --real                # foreground worker using real Ollama
