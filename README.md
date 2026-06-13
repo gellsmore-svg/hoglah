@@ -169,7 +169,15 @@ You can also run the packaged install smoke test after installing the wheel:
 ```bash
 python scripts/test_packaged_install.py
 ```
-(This is what we used to validate that `pip install hoglah-0.2.1-py3-none-any.whl[cli]` produces a fully working installation.)
+
+To validate with your working local Ollama (full real adapter paths including show, pull, context auto-detect):
+```bash
+RUN_OLLAMA_TESTS=1 python scripts/test_packaged_install.py
+# or
+HOGLAH_USE_REAL_ADAPTER=1 python scripts/test_packaged_install.py
+```
+
+(This is the recommended way to thoroughly test the packaged v0.2.1 with real Ollama.)
 
 **Real Ollama:** Opt-in via `use_real=True` / `HOGLAH_USE_REAL_ADAPTER=1` / `--real`. Auto-pulls models, uses model info for context, reports real truncation/usage. A gated integration test exists (`RUN_OLLAMA_TESTS=1 pytest ...`). The vast majority of real paths are also covered by unit mocks.
 hoglah cancel <job-id>

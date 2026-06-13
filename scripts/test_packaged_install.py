@@ -9,10 +9,20 @@ It proves that the packaged artifact installs correctly and that
 core functionality works end-to-end using the installed entry points
 and the public Python API.
 
-Usage example:
+Usage example (stub, always works):
     python -m venv /tmp/hoglah-smoke
     /tmp/hoglah-smoke/bin/pip install dist/hoglah-0.2.1-py3-none-any.whl[cli]
     /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
+
+With your local working Ollama (for full V1 real-path validation):
+    RUN_OLLAMA_TESTS=1 /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
+
+    # or
+    HOGLAH_USE_REAL_ADAPTER=1 /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
+
+The script will automatically switch to a real model (gemma3:1b) and exercise
+the real adapter (show_model, pull if needed, context auto-detection from model,
+full submit + wait, etc.).
 """
 
 from __future__ import annotations
@@ -66,27 +76,29 @@ def main() -> None:
     print(f"   Installed version: {hoglah.__version__}")
     assert hoglah.__version__ == "0.2.1", "Version mismatch in packaged install!"
 
-    # 2. Create instance for direct API use (no worker needed for these)
-    print("\n2. Creating Hoglah (StubAdapter, no background worker)...")
-    h = Hoglah(config={"db_path": TEST_DB, "log_level": "WARNING"}, start_worker=False)
+    # 2. Create instance
+    print("\n2. Creating Hoglah instance...")
+    use_real = bool(os.environ.get("RUN_OLLAMA_TESTS") == "1" or os.environ.get("HOGLAH_USE_REAL_ADAPTER"))
+    h = Hoglah(config={"db_path": TEST_DB, "log_level": "WARNING"}, start_worker= not use_real, use_real=use_real)
     print(f"   Adapter: {type(h.adapter).__name__}")
     info = h.info()
     print(f"   Version via .info(): {info.get('version')}")
-    print(f"   Adapter via .info(): {info['adapter']}")
+    print(f"   Using real Ollama: {use_real}")
 
     # 3. CLI submit + --wait (CLI starts its own worker — most realistic fresh-install path)
     print("\n3. CLI submit with --wait (exercises installed CLI entry point + worker)...")
+    model = "gemma3:1b" if use_real else "stub-test:1b"
     run_cli(
         "submit", "This is a packaged smoke test prompt.",
-        "--model", "stub-test:1b",
+        "--model", model,
         "--tag", "smoke,packaged",
-        "--wait", "--timeout", "15",
+        "--wait", "--timeout", "30" if use_real else "15",
     )
-    print("   Submit + wait via installed CLI succeeded.")
+    print(f"   Submit + wait via installed CLI succeeded (model={model}).")
 
     # 4. Submit with parent via CLI, then filter list by parent
     print("\n4. Parent/child via CLI + list --parent filter...")
-    run_cli("submit", "Parent task for filter test", "--model", "stub-test:1b", "--wait")
+    run_cli("submit", "Parent task for filter test", "--model", model, "--wait")
     # We don't capture the exact parent ID easily here, so just exercise the filter path
     run_cli("list", "--parent", "nonexistent-parent-123", "--json")
     print("   list --parent via CLI executed successfully.")
@@ -94,7 +106,7 @@ def main() -> None:
     # 5. Direct library API (stats, info, show_model)
     print("\n5. Library API smoke (stats, info, show_model)...")
     stats = h.stats()
-    model_info = h.show_model("stub-test:1b")
+    model_info = h.show_model(model)
     print(f"   stats total_jobs: {stats['total_jobs']}")
     print(f"   show_model has keys: {list(model_info.keys())[:4]}")
 
@@ -104,7 +116,7 @@ def main() -> None:
     run_cli("info", "--json")
     run_cli("stats", "--json")
     run_cli("models")
-    run_cli("show", "stub-test:1b", "--json")
+    run_cli("show", model, "--json")
 
     # 7. rm and clear via CLI
     print("\n7. Cleanup via rm and clear (CLI)...")
