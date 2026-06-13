@@ -41,6 +41,29 @@ from .store import JobStore, create_sqlite_store
 logger = logging.getLogger("hoglah")
 
 
+def _run_async(coro_factory):
+    """Run an async coroutine to completion from synchronous code, whether
+    or not an event loop is already running in this thread.
+
+    `coro_factory` is a zero-arg callable returning a fresh coroutine (so
+    it can be (re)created in whichever thread actually runs it). When no
+    loop is running we use `asyncio.run`; when one IS running (e.g. the
+    caller is inside `asyncio.run`, a notebook, or an async web handler),
+    blocking the live loop is impossible, so we run the coroutine in a
+    short-lived worker thread and wait for its result. The previous
+    `except RuntimeError -> run_until_complete` fallback did not work —
+    a second loop cannot run while one is already running in the thread.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro_factory())  # no running loop in this thread
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(lambda: asyncio.run(coro_factory())).result()
+
+
 class Hoglah:
     """Main client for submitting and managing Ollama jobs.
 
@@ -635,39 +658,17 @@ class Hoglah:
         """Ensure the given model is available (pulls if using real adapter and missing).
 
         Safe no-op for StubAdapter. Useful before submitting jobs with use_real=True.
+        Callable from sync code or from within a running event loop.
         """
-        import asyncio
-
-        async def _pull():
-            await self.adapter.pull_model(model)
-
-        try:
-            asyncio.run(_pull())
-        except RuntimeError:
-            # Fallback if we're inside an existing event loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(_pull())
-            loop.close()
+        _run_async(lambda: self.adapter.pull_model(model))
 
     def show_model(self, model: str) -> dict[str, Any]:
         """Return details for a model (via adapter.show_model).
 
         Useful for inspecting context size, template, etc. (especially with real adapter).
+        Callable from sync code or from within a running event loop.
         """
-        import asyncio
-
-        async def _show():
-            return await self.adapter.show_model(model)
-
-        try:
-            return asyncio.run(_show())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(_show())
-            loop.close()
-            return result
+        return _run_async(lambda: self.adapter.show_model(model))
 
     def __enter__(self) -> "Hoglah":
         """Support `with Hoglah(...) as h:` for automatic cleanup."""
