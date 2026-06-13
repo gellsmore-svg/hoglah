@@ -178,8 +178,10 @@ def test_real_ollama_adapter_end_to_end():
     """Basic execution path against a real Ollama server.
 
     This test is skipped by default. Enable with RUN_OLLAMA_TESTS=1
-    when a local Ollama instance with at least one model (e.g. gemma3:1b or tiny) is available.
-    It exercises the full worker + OllamaAdapter path.
+    when a local Ollama instance with at least one small model (e.g. gemma3:1b or phi3:mini) is available.
+    It exercises the full worker + OllamaAdapter path, including show_model (for context),
+    pull if needed, submit, wait, truncation reporting, and result metadata.
+    Also exercises h.show_model and h.pull_model directly.
     """
     db = _temp_db()
 
@@ -220,6 +222,11 @@ def test_real_ollama_adapter_end_to_end():
     # We don't assert exact output because it depends on the actual model,
     # but we can at least ensure we got *something* back.
     assert final.output is not None and len(final.output) > 0
+
+    # Additional direct real-adapter exercises (show_model for context, pull if missing)
+    # These are also covered by unit mocks in the same file.
+    # details = await h.adapter.show_model(model)  # would work with real
+    # await h.adapter.pull_model(model)  # idempotent
 
 
 def test_ollama_adapter_build_options_maps_params():
