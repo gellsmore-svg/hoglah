@@ -94,6 +94,15 @@ class JobStore(Protocol):
         """Return dict of status -> count for quick queue overview."""
         ...
 
+    def delete_jobs(
+        self,
+        *,
+        status: JobStatus | None = None,
+        before: str | None = None,  # ISO timestamp, delete jobs updated before this
+    ) -> int:
+        """Delete jobs matching filters. Returns number deleted."""
+        ...
+
 
 class SQLiteJobStore:
     """SQLite-backed JobStore (default implementation).
@@ -297,6 +306,29 @@ class SQLiteJobStore:
                 "SELECT status, COUNT(*) as c FROM jobs GROUP BY status"
             ).fetchall()
         return {row["status"]: row["c"] for row in rows}
+
+    def delete_jobs(
+        self,
+        *,
+        status: JobStatus | None = None,
+        before: str | None = None,  # ISO timestamp
+    ) -> int:
+        """Delete jobs matching filters. Returns number deleted."""
+        query = "DELETE FROM jobs"
+        params: list[Any] = []
+        where = []
+        if status is not None:
+            where.append("status = ?")
+            params.append(status.value)
+        if before is not None:
+            where.append("updated_at < ?")
+            params.append(before)
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        with self._lock:
+            cur = self._conn.execute(query, params)
+            self._conn.commit()
+        return cur.rowcount
 
 
 # Convenience factory (used by client)
