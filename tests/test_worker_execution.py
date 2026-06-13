@@ -195,10 +195,19 @@ def test_real_ollama_adapter_end_to_end():
 
         # Use a very small prompt; model name is up to the tester's Ollama
         # We pick a common small one; if not present the call will fail (acceptable for this gated test)
+        model = "gemma3:1b"  # change if your Ollama has a different small model
+        # Exercise direct show and pull (will pull if missing)
+        details = await h.adapter.show_model(model)
+        await h.adapter.pull_model(model)
+        # Also via client convenience
+        details2 = h.show_model(model)
+        h.pull_model(model)
+
         job_id = h.submit(
             prompt="Reply with exactly the word: PONG",
-            model="gemma3:1b",  # change if your Ollama has a different small model
+            model=model,
             max_retries=0,
+            # Do not specify num_ctx to test auto from model details
         )
 
         deadline = asyncio.get_event_loop().time() + 60.0
@@ -213,9 +222,9 @@ def test_real_ollama_adapter_end_to_end():
             await asyncio.sleep(0.2)
 
         h.close()
-        return final
+        return final, details, details2
 
-    final = asyncio.run(_run())
+    final, details, details2 = asyncio.run(_run())
 
     assert final is not None
     assert final.status == JobStatus.COMPLETED
@@ -223,10 +232,14 @@ def test_real_ollama_adapter_end_to_end():
     # but we can at least ensure we got *something* back.
     assert final.output is not None and len(final.output) > 0
 
-    # Additional direct real-adapter exercises (show_model for context, pull if missing)
-    # These are also covered by unit mocks in the same file.
-    # details = await h.adapter.show_model(model)  # would work with real
-    # await h.adapter.pull_model(model)  # idempotent
+    # Verify model details were retrievable (context calibration)
+    assert details is not None
+    assert "parameters" in details or "details" in details
+    assert details2 is not None
+
+    # If the model provided num_ctx and we didn't specify, effective should be set from it
+    if final.effective_num_ctx:
+        assert final.effective_num_ctx > 0
 
 
 def test_ollama_adapter_build_options_maps_params():
