@@ -14,15 +14,20 @@ Usage example (stub, always works):
     /tmp/hoglah-smoke/bin/pip install dist/hoglah-0.2.1-py3-none-any.whl[cli]
     /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
 
-With your local working Ollama (for full V1 real-path validation):
+With your local working Ollama / llama.cpp (for full V1 real-path validation of the packaged wheel):
     RUN_OLLAMA_TESTS=1 /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
 
     # or
     HOGLAH_USE_REAL_ADAPTER=1 /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
 
-The script will automatically switch to a real model (gemma3:1b) and exercise
-the real adapter (show_model, pull if needed, context auto-detection from model,
-full submit + wait, etc.).
+The script will automatically switch to a real model (defaults to gemma3:1b; edit the script if needed) and exercise
+the real adapter paths (show_model, pull if needed, context auto-detection from model info, full submit + wait,
+parent jobs, etc.) using the *installed* package.
+
+Also run the gated pytest for deeper integration:
+    RUN_OLLAMA_TESTS=1 python -m pytest tests/test_worker_execution.py::test_real_ollama_adapter_end_to_end -q -s --tb=long
+
+Please run on your machine (where Ollama/llama.cpp works) and share the full output.
 """
 
 from __future__ import annotations
@@ -171,9 +176,21 @@ def main() -> None:
     assert result.returncode != 0
     print("   wait command executed (expected non-zero for non-existent job).")
 
-    print("\n=== Packaged smoke test PASSED ===")
+    print("\n=== Packaged smoke test PASSED (stub mode in this execution env) ===")
     print(f"Installed hoglah version: {hoglah.__version__}")
     print(f"Test artifacts left in: {TEST_DB.parent} (safe to delete)")
+
+    if not use_real:
+        print("\nNOTE: This run used the safe StubAdapter because no real Ollama/llama.cpp backend was reachable in the execution environment.")
+        print("To validate the exact same installed wheel against your working local Ollama (llama.cpp):")
+        print("  1. On your machine (in the cello WSL env where Ollama works):")
+        print("     python3 -m venv /tmp/hoglah-real-validate")
+        print("     /tmp/hoglah-real-validate/bin/pip install dist/hoglah-0.2.1-py3-none-any.whl[cli]")
+        print("     RUN_OLLAMA_TESTS=1 /tmp/hoglah-real-validate/bin/python scripts/test_packaged_install.py")
+        print("  2. Or set HOGLAH_USE_REAL_ADAPTER=1 instead.")
+        print("  3. The script will switch to a real model, exercise show_model/pull, auto context detection, full submit+wait, etc.")
+        print("  4. Also run the gated test: RUN_OLLAMA_TESTS=1 python -m pytest tests/test_worker_execution.py::test_real_ollama_adapter_end_to_end -q -s --tb=long")
+        print("\nPlease run the above on your machine with your working Ollama and share the output so we can confirm/fix any real-backend issues.")
 
 
 if __name__ == "__main__":
