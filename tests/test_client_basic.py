@@ -297,6 +297,23 @@ def test_hoglah_context_manager():
     h2.close()
 
 
+def test_log_level_config():
+    """Hoglah respects log_level in config and via env (HOGLAH_LOG_LEVEL)."""
+    import logging
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db, "log_level": "DEBUG"}, start_worker=False)
+    assert logging.getLogger("hoglah").level == logging.DEBUG
+    h.close()
+
+    # env override
+    import os
+    os.environ["HOGLAH_LOG_LEVEL"] = "ERROR"
+    h2 = Hoglah(config={"db_path": db}, start_worker=False)
+    assert logging.getLogger("hoglah").level == logging.ERROR
+    h2.close()
+    del os.environ["HOGLAH_LOG_LEVEL"]
+
+
 def test_info():
     """Test Hoglah.info() snapshot and CLI."""
     db = _temp_db()

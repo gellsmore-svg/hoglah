@@ -93,6 +93,17 @@ class Hoglah:
         self.config: HoglahSettings = config  # type: ignore[assignment]
         self.config.ensure_dirs()
 
+        # Configure hoglah logger (configurable level, basic handler if none)
+        level = getattr(logging, self.config.log_level.upper(), logging.INFO)
+        hoglah_logger = logging.getLogger("hoglah")
+        hoglah_logger.setLevel(level)
+        if not hoglah_logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s [%(levelname)s] hoglah: %(message)s")
+            )
+            hoglah_logger.addHandler(handler)
+
         # Callbacks registry for named/durable callbacks (ADR-006)
         self._callbacks: dict[str, JobCallback] = callbacks or {}
 

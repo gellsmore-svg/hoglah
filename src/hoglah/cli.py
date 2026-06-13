@@ -164,9 +164,10 @@ def info(
 
     print("Hoglah Info")
     print("-" * 30)
-    print(f"adapter : {i['adapter']}")
-    print(f"db_path : {i['config']['db_path']}")
+    print(f"adapter     : {i['adapter']}")
+    print(f"db_path     : {i['config']['db_path']}")
     print(f"concurrency : {i['config']['concurrency']}")
+    print(f"log_level   : {i['config'].get('log_level', 'INFO')}")
     print(f"ollama_host : {i['config'].get('ollama_host') or 'default'}")
     print("\nStats:")
     for k, v in i["stats"]["counts"].items():
