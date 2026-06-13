@@ -131,6 +131,7 @@ hoglah show gemma3:1b --json     # model details (context, template, etc.)
 hoglah clear --status completed --older-than 7 --yes  # prune old jobs
 hoglah rm <job-id> --yes  # remove specific job
 hoglah wait <job-id> --timeout 60 --json  # block until done, machine readable
+hoglah doctor --real  # diagnose setup and real Ollama/llama.cpp connectivity
 hoglah status <job-id> --json
 
 ## V1 Scope
@@ -194,6 +195,10 @@ RUN_OLLAMA_TESTS=1 python -m pytest tests/test_worker_execution.py::test_real_ol
 ```
 
 Run the above on your machine (the same WSL cello env where Claude + your Ollama/llama.cpp work) and share the output. The smoke test script and gated test were built precisely for this real-backend validation of the packaged artifact.
+
+To make Ollama listen on all interfaces (if needed for cross-context access in WSL):
+- Windows cmd: `setx OLLAMA_HOST "0.0.0.0"` (then restart `ollama serve`)
+- Or in WSL shell before starting: `export OLLAMA_HOST=0.0.0.0`
 hoglah cancel <job-id>
 hoglah models
 hoglah run --real                # foreground worker using real Ollama
