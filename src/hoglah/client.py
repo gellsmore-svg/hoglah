@@ -492,7 +492,7 @@ class Hoglah:
                     truncated=meta.get("truncated", False),
                     truncation_reason=meta.get("truncation_reason"),
                     estimated_prompt_tokens=usage.get("prompt_tokens"),
-                    effective_num_ctx=request.num_ctx,
+                    effective_num_ctx=meta.get("effective_num_ctx") or request.num_ctx,
                 )
             except Exception as exc:
                 last_error = str(exc)

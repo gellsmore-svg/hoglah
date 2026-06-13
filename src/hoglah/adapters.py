@@ -89,6 +89,8 @@ class StubAdapter(BaseAdapter):
             meta["truncation_reason"] = "simulated_context_limit_in_stub"
             output = base[:80] + " ... [truncated in stub for testing]"
 
+        meta["effective_num_ctx"] = num_ctx
+
         usage = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -165,6 +167,28 @@ class OllamaAdapter(BaseAdapter):
 
         # Auto-pull if the model is not present (makes real mode much more ergonomic)
         await self.pull_model(request.model)
+
+        # Smart context handling: query model details for recommended num_ctx if not explicitly provided
+        effective_num_ctx = request.num_ctx
+        try:
+            model_info = await self.show_model(request.model)
+            params = model_info.get("parameters", "") or ""
+            if not effective_num_ctx:
+                for line in str(params).splitlines():
+                    if "num_ctx" in line.lower():
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            try:
+                                effective_num_ctx = int(parts[-1])
+                                break
+                            except (ValueError, TypeError):
+                                pass
+            if effective_num_ctx:
+                meta["effective_num_ctx"] = effective_num_ctx
+                if "num_ctx" not in options:
+                    options["num_ctx"] = effective_num_ctx
+        except Exception:
+            pass  # best effort, don't fail the job
 
         try:
             if request.messages:
