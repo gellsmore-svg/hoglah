@@ -88,13 +88,29 @@ def main() -> None:
     # 3. CLI submit + --wait (CLI starts its own worker — most realistic fresh-install path)
     print("\n3. CLI submit with --wait (exercises installed CLI entry point + worker)...")
     model = "gemma3:1b" if use_real else "stub-test:1b"
-    run_cli(
+    submit_result = run_cli(
         "submit", "This is a packaged smoke test prompt.",
         "--model", model,
         "--tag", "smoke,packaged",
         "--wait", "--timeout", "30" if use_real else "15",
+        capture=True,
     )
     print(f"   Submit + wait via installed CLI succeeded (model={model}).")
+
+    # Capture job ID from output for verification (works in both stub and real)
+    submitted_id = None
+    for line in (submit_result.stdout or "").splitlines():
+        if "Submitted:" in line:
+            submitted_id = line.split("Submitted:")[-1].strip()
+            break
+    if submitted_id:
+        print(f"   Captured job ID: {submitted_id}")
+        if use_real:
+            # Verify via the library that the real adapter set effective_num_ctx
+            res = h.get(submitted_id)
+            print(f"   Real result effective_num_ctx: {res.effective_num_ctx}")
+            if res.effective_num_ctx and res.effective_num_ctx > 0:
+                print("   ✓ Real adapter (llama.cpp via Ollama) populated effective_num_ctx from model info")
 
     # 4. Submit with parent via CLI, then filter list by parent
     print("\n4. Parent/child via CLI + list --parent filter...")
@@ -109,6 +125,14 @@ def main() -> None:
     model_info = h.show_model(model)
     print(f"   stats total_jobs: {stats['total_jobs']}")
     print(f"   show_model has keys: {list(model_info.keys())[:4]}")
+
+    if use_real:
+        print("   Real Ollama (llama.cpp) checks:")
+        params = str(model_info.get("parameters", "") or model_info.get("details", ""))
+        print(f"     Model info parameters/details snippet: {params[:150]}...")
+        if "num_ctx" in params.lower() or "context" in params.lower():
+            print("     ✓ Model reports context size info (used for auto num_ctx if not specified)")
+        print("     (Previous real submit without num_ctx should have effective_num_ctx populated from this)")
 
     # 6. CLI inspection commands (installed entry point)
     print("\n6. CLI inspection commands (installed 'hoglah' binary)...")
