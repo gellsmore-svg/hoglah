@@ -5,21 +5,31 @@ All notable changes to Hoglah will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased / next]
+## [Unreleased]
+
+### Added
+- (none yet)
+
+## [0.2.1] - 2026-06-13
 
 ### Added
 - `hoglah show <model>` CLI and Hoglah.show_model() / adapter.show_model() for inspecting model details (context size, template, family, etc.).
 - `hoglah clear` (and Hoglah.clear) for pruning old/terminal jobs by status or age.
-- `hoglah info` (and Hoglah.info) for config/adapter/stats snapshot.
+- `hoglah info` (and Hoglah.info) for config/adapter/stats snapshot (now includes version).
 - Configurable log_level (HOGLAH_LOG_LEVEL / config.log_level, default INFO).
+- `hoglah rm <job-id>` for deleting specific jobs (with --yes).
 - --parent filter to list/ps, enriched --json with 'preview', dynamic PARENT column in human table.
-- Smart context handling in OllamaAdapter (uses show_model to auto-detect num_ctx, sets effective_num_ctx).
+- `hoglah wait <job-id>` (standalone, supports --json) to block until terminal and print result.
+- --json support for rm and wait.
+- Smart context handling in OllamaAdapter (uses show_model to auto-detect num_ctx from model parameters if not specified, sets effective_num_ctx).
 - GitHub release workflow (.github/workflows/release.yml).
-- 20+ passing tests.
+- Comprehensive mocked unit tests for OllamaAdapter paths (show, pull, run with context/truncation).
+- 24 passing tests + 1 gated real-Ollama test.
 
 ### Changed
 - Improved list/ps human/JSON output for better DX and parent_job chaining visibility.
 - Real adapter now auto-pulls missing models and has smarter truncation/context support.
+- Version bumped to 0.2.1.
 
 ## [0.2.0] - 2026-06-12
 
