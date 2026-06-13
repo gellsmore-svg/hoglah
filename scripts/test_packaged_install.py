@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Smoke test for a freshly packaged Hoglah installation (v0.2.1).
+Smoke test for a freshly packaged Hoglah installation.
 
 This script is meant to be run from a **clean, non-editable** environment
 after installing the built wheel (or from a GitHub release / PyPI).
@@ -11,7 +11,7 @@ and the public Python API.
 
 Usage example (stub, always works):
     python -m venv /tmp/hoglah-smoke
-    /tmp/hoglah-smoke/bin/pip install dist/hoglah-0.2.1-py3-none-any.whl[cli]
+    /tmp/hoglah-smoke/bin/pip install dist/hoglah-*-py3-none-any.whl[cli]
     /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
 
 With your local working Ollama / llama.cpp (for full V1 real-path validation of the packaged wheel):
@@ -35,9 +35,7 @@ Please run on your machine and share the full output (this is how we validate th
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -72,7 +70,7 @@ def run_cli(*args, check=True, capture=False, needs_db: bool = True) -> subproce
 
 
 def main() -> None:
-    print("=== Hoglah Packaged Install Smoke Test (v0.2.1) ===")
+    print("=== Hoglah Packaged Install Smoke Test ===")
     print(f"Python: {sys.executable}")
     print(f"Test DB: {TEST_DB}")
     print()
@@ -82,11 +80,19 @@ def main() -> None:
     import hoglah
     from hoglah import Hoglah, JobStatus
     print(f"   Installed version: {hoglah.__version__}")
-    assert hoglah.__version__ == "0.2.1", "Version mismatch in packaged install!"
+    # Version is read from package metadata; assert it's a real installed
+    # version (not the raw-source fallback) rather than a hardcoded literal,
+    # so this test never breaks on a routine version bump.
+    assert hoglah.__version__ and hoglah.__version__ != "0.0.0+source", (
+        "Version not resolved from installed package metadata!"
+    )
 
     # 2. Create instance
     print("\n2. Creating Hoglah instance...")
     use_real = bool(os.environ.get("RUN_OLLAMA_TESTS") == "1" or os.environ.get("HOGLAH_USE_REAL_ADAPTER"))
+    # Model to use: a small real model when exercising real Ollama, else the
+    # stub model name. Defined before any use (real-mode block references it).
+    model = "gemma3:1b" if use_real else "stub-test:1b"
     # Always start the worker in the test so library submits get processed (important for real mode)
     h = Hoglah(config={"db_path": TEST_DB, "log_level": "WARNING"}, start_worker=True, use_real=use_real)
     print(f"   Adapter: {type(h.adapter).__name__}")
@@ -111,7 +117,6 @@ def main() -> None:
 
     # 3. CLI submit + --wait (CLI starts its own worker — most realistic fresh-install path)
     print("\n3. CLI submit with --wait (exercises installed CLI entry point + worker)...")
-    model = "gemma3:1b" if use_real else "stub-test:1b"
     submit_result = run_cli(
         "submit", "This is a packaged smoke test prompt.",
         "--model", model,
@@ -179,7 +184,8 @@ def main() -> None:
     assert result.returncode != 0
     print("   wait command executed (expected non-zero for non-existent job).")
 
-    print("\n=== Packaged smoke test PASSED (stub mode in this execution env) ===")
+    _mode = "REAL Ollama" if use_real else "stub"
+    print(f"\n=== Packaged smoke test PASSED ({_mode} mode) ===")
     print(f"Installed hoglah version: {hoglah.__version__}")
     print(f"Test artifacts left in: {TEST_DB.parent} (safe to delete)")
 
