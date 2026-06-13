@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- (none yet)
+### Fixed
+- **Sync facades now work inside a running event loop.** `Hoglah.show_model()`
+  and `pull_model()` used a `try asyncio.run() except RuntimeError ->
+  run_until_complete()` fallback that could not recover when a loop was
+  already running (notebooks, async handlers, the gated real test). Replaced
+  with a loop-safe `_run_async` helper (runs in a one-shot worker thread when
+  a loop is live). Regression test added (no Ollama needed).
+- **OllamaAdapter no longer breaks across event loops.** The cached
+  `ollama.AsyncClient` was bound to the first loop that used it, raising
+  "bound to a different event loop" when reused from another (every sync
+  facade call spins a fresh loop). Now cached per-loop and recreated when the
+  running loop changes.
+
+### Validated
+- **First real end-to-end inference confirmed** against a live Ollama
+  (submit → worker → OllamaAdapter → result; gated `RUN_OLLAMA_TESTS=1` test
+  now PASSES). Prior "untested with real Ollama" caveat is resolved. The
+  earlier unreachability was WSL→Windows networking (reach the Windows daemon
+  at the WSL2 gateway IP with `OLLAMA_HOST=0.0.0.0`), not a hard limitation.
 
 ## [0.2.1] - 2026-06-13
 

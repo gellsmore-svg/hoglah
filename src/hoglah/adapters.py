@@ -134,10 +134,19 @@ class OllamaAdapter(BaseAdapter):
     def __init__(self, host: str | None = None):
         self.host = host
         self._client: ollama.AsyncClient | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
 
     def _get_client(self) -> ollama.AsyncClient:
-        if self._client is None:
+        # ollama.AsyncClient wraps an httpx.AsyncClient whose primitives are
+        # bound to the event loop that first uses them; reusing it from a
+        # different loop raises "bound to a different event loop". The
+        # background worker runs in one loop (cached, fast path), but the
+        # sync facades run each call in a fresh loop, so cache PER LOOP and
+        # recreate when the running loop changes.
+        loop = asyncio.get_running_loop()
+        if self._client is None or self._client_loop is not loop:
             self._client = ollama.AsyncClient(host=self.host)
+            self._client_loop = loop
         return self._client
 
     def _build_options(self, request: JobRequest) -> dict[str, Any]:

@@ -462,3 +462,29 @@ def test_remove_job():
     # j2 remains
     assert h.status(j2) == JobStatus.QUEUED
     h.close()
+
+def test_sync_facade_callable_from_running_event_loop():
+    """show_model / pull_model (sync facades over async adapter calls) must
+    work whether called from sync code OR from within a running event loop
+    (e.g. notebooks, async apps). Regression test for the broken
+    `except RuntimeError -> run_until_complete` fallback, which could not
+    recover inside a live loop. Uses the default StubAdapter (no Ollama)."""
+    import asyncio
+
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db}, start_worker=False)
+    try:
+        # Sync context (no running loop): the common case.
+        assert isinstance(h.show_model("gemma3:1b"), dict)
+        h.pull_model("gemma3:1b")  # no-op on stub; must not raise
+
+        # Inside a running loop: previously raised
+        # "Cannot run the event loop while another loop is running".
+        async def _inside_loop():
+            h.pull_model("gemma3:1b")
+            return h.show_model("gemma3:1b")
+
+        details = asyncio.run(_inside_loop())
+        assert isinstance(details, dict)
+    finally:
+        h.close()
