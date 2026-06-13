@@ -188,6 +188,7 @@ def info(
 
     print("Hoglah Info")
     print("-" * 30)
+    print(f"version     : {i.get('version', 'unknown')}")
     print(f"adapter     : {i['adapter']}")
     print(f"db_path     : {i['config']['db_path']}")
     print(f"concurrency : {i['config']['concurrency']}")

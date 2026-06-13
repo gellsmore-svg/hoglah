@@ -623,7 +623,9 @@ class Hoglah:
 
         Useful for debugging and monitoring.
         """
+        from . import __version__
         return {
+            "version": __version__,
             "config": self.config.to_dict(),
             "adapter": type(self.adapter).__name__,
             "stats": self.stats(),
