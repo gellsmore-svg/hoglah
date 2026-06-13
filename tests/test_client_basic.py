@@ -275,6 +275,11 @@ def test_cli_submit_and_list(tmp_path):
     assert rm_res.exit_code != 0  # should fail for not found
     assert "not found" in (rm_res.output or "").lower() or rm_res.exit_code == 1
 
+    # wait command
+    wait_res = runner.invoke(app, ["wait", "nonexistent", "--timeout", "0.1", "--db", str(db)])
+    assert wait_res.exit_code != 0
+    assert "not found" in (wait_res.output or "").lower() or "timed out" in (wait_res.output or "").lower()
+
     # show model
     show_res = runner.invoke(app, ["show", "stub-test:1b", "--db", str(db)])
     assert show_res.exit_code == 0
