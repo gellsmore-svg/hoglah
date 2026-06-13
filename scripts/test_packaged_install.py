@@ -79,11 +79,27 @@ def main() -> None:
     # 2. Create instance
     print("\n2. Creating Hoglah instance...")
     use_real = bool(os.environ.get("RUN_OLLAMA_TESTS") == "1" or os.environ.get("HOGLAH_USE_REAL_ADAPTER"))
-    h = Hoglah(config={"db_path": TEST_DB, "log_level": "WARNING"}, start_worker= not use_real, use_real=use_real)
+    # Always start the worker in the test so library submits get processed (important for real mode)
+    h = Hoglah(config={"db_path": TEST_DB, "log_level": "WARNING"}, start_worker=True, use_real=use_real)
     print(f"   Adapter: {type(h.adapter).__name__}")
     info = h.info()
     print(f"   Version via .info(): {info.get('version')}")
     print(f"   Using real Ollama: {use_real}")
+
+    if use_real:
+        print("\n   [Real mode] Direct library submit + wait to test real adapter + context auto-detect...")
+        real_job = h.submit(
+            prompt="What is 2 + 2? Reply with just the number.",
+            model=model,
+            max_retries=0,
+            # deliberately omit num_ctx to test auto from model via show_model
+        )
+        real_res = h.wait(real_job, timeout=60)
+        print(f"     Real library job status: {real_res.status}")
+        print(f"     effective_num_ctx: {real_res.effective_num_ctx}")
+        print(f"     truncated: {real_res.truncated}")
+        assert real_res.status == JobStatus.COMPLETED
+        print("     ✓ Real library submit+wait + context handling succeeded")
 
     # 3. CLI submit + --wait (CLI starts its own worker — most realistic fresh-install path)
     print("\n3. CLI submit with --wait (exercises installed CLI entry point + worker)...")
