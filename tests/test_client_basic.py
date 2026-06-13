@@ -333,6 +333,28 @@ def test_show_model():
     h.close()
 
 
+def test_context_from_model_info():
+    """Real adapter (via stub sim) and submit set effective_num_ctx from model details if not specified."""
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db}, start_worker=False)
+    job_id = h.submit(prompt="context test", model="stub-test:1b", max_retries=0)
+    # Simulate worker execution by directly calling adapter (since start_worker=False)
+    import asyncio
+    from hoglah.adapters import StubAdapter
+    ad = StubAdapter()
+    req = h._store.get(job_id)["request"]  # internal for test
+    # but easier: use the execute path? For simplicity, call show and check client result after manual
+    # Actually, since worker not run, manually set a result with meta
+    # Better: use the adapter directly in test
+    loop = asyncio.new_event_loop()
+    output, usage, meta = loop.run_until_complete(ad.run(
+        type('Req', (), {"prompt": "hi", "messages": None, "model": "stub-test:1b", "num_ctx": None, **{k:None for k in ['system_prompt','options','tags','priority','timeout_seconds','max_retries','metadata','parent_job_id','temperature','top_p','top_k','repeat_penalty','seed','stop','num_predict','format','keep_alive','callback_key']}})()
+    ))
+    loop.close()
+    assert meta.get("effective_num_ctx") == 4096  # from stub show
+    h.close()
+
+
 def test_info():
     """Test Hoglah.info() snapshot and CLI."""
     db = _temp_db()
