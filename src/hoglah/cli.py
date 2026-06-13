@@ -151,6 +151,30 @@ def stats(
 
 
 @app.command()
+def info(
+    db: Path | None = typer.Option(None, "--db", help="Override database path"),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of human text"),
+) -> None:
+    """Show instance info: config, adapter in use, and queue stats."""
+    h = _get_hoglah(db)
+    i = h.info()
+    if json_out:
+        print(json.dumps(i, indent=2))
+        return
+
+    print("Hoglah Info")
+    print("-" * 30)
+    print(f"adapter : {i['adapter']}")
+    print(f"db_path : {i['config']['db_path']}")
+    print(f"concurrency : {i['config']['concurrency']}")
+    print(f"ollama_host : {i['config'].get('ollama_host') or 'default'}")
+    print("\nStats:")
+    for k, v in i["stats"]["counts"].items():
+        print(f"  {k:12} : {v}")
+    print(f"  {'total':12} : {i['stats']['total_jobs']}")
+
+
+@app.command()
 def clear(
     status: str | None = typer.Option(
         None, "--status", "-s", help="Only clear jobs with this status (e.g. completed, failed)"

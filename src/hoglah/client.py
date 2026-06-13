@@ -598,6 +598,17 @@ class Hoglah:
             before = cutoff.isoformat()
         return self._store.delete_jobs(status=status, before=before) if hasattr(self._store, "delete_jobs") else 0
 
+    def info(self) -> dict[str, Any]:
+        """Return a snapshot of the instance: config, adapter type, and current stats.
+
+        Useful for debugging and monitoring.
+        """
+        return {
+            "config": self.config.to_dict(),
+            "adapter": type(self.adapter).__name__,
+            "stats": self.stats(),
+        }
+
     def pull_model(self, model: str) -> None:
         """Ensure the given model is available (pulls if using real adapter and missing).
 

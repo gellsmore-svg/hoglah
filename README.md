@@ -75,6 +75,7 @@ hoglah submit "Explain Hoglah" --model gemma3:1b --wait
 hoglah list --status completed
 hoglah ps --json                 # alias for list, machine-readable
 hoglah stats --json              # queue overview (counts by status)
+hoglah info --json               # config + adapter + stats snapshot
 hoglah clear --status completed --older-than 7 --yes  # prune old jobs
 hoglah status <job-id> --json
 hoglah cancel <job-id>
