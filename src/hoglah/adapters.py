@@ -160,6 +160,11 @@ class OllamaAdapter(BaseAdapter):
         self.host = host
         self._client: ollama.AsyncClient | None = None
         self._client_loop: asyncio.AbstractEventLoop | None = None
+        # Per-model memoization so a long-running worker doesn't re-`show`/
+        # re-check every model on every job. Process-lifetime; `force=True`
+        # bypasses (and a fresh CLI process always starts cold).
+        self._pulled: set[str] = set()
+        self._show_cache: dict[str, dict[str, Any]] = {}
 
     def _get_client(self) -> ollama.AsyncClient:
         # ollama.AsyncClient wraps an httpx.AsyncClient whose primitives are
@@ -342,23 +347,9 @@ class OllamaAdapter(BaseAdapter):
                     result.append(d)
         return result
 
-    async def pull_model(self, model: str) -> None:
-        """Pull the model if it is not already present locally."""
-        client = self._get_client()
-        try:
-            await client.show(model=model)
-            return  # already present
-        except Exception:
-            pass  # not present, pull it
-        # Perform the pull (can be long-running; no stream for simplicity)
-        await client.pull(model=model)
-
-    async def show_model(self, model: str) -> dict[str, Any]:
-        client = self._get_client()
-        resp = await client.show(model=model)
+    def _normalize_show(self, resp: Any, model: str) -> dict[str, Any]:
         if isinstance(resp, dict):
             return resp
-        # Convert object to dict
         d = {}
         for attr in ("name", "model", "size", "digest", "details", "parameters", "template", "modified_at"):
             if hasattr(resp, attr):
@@ -366,3 +357,34 @@ class OllamaAdapter(BaseAdapter):
             elif isinstance(resp, dict) and attr in resp:
                 d[attr] = resp[attr]
         return d or {"name": model}
+
+    async def pull_model(self, model: str, force: bool = False) -> None:
+        """Pull the model if it is not already present locally.
+
+        Caches presence for the process so a busy worker doesn't re-`show`
+        every model on every job; the successful presence-check also seeds
+        the show cache so a same-job `show_model` is free. `force=True`
+        bypasses the cache and always (re)checks/pulls.
+        """
+        if not force and model in self._pulled:
+            return
+        client = self._get_client()
+        try:
+            resp = await client.show(model=model)
+            self._show_cache[model] = self._normalize_show(resp, model)
+            self._pulled.add(model)
+            return  # already present
+        except Exception:
+            pass  # not present, pull it
+        # Perform the pull (can be long-running; no stream for simplicity)
+        await client.pull(model=model)
+        self._pulled.add(model)
+
+    async def show_model(self, model: str, force: bool = False) -> dict[str, Any]:
+        if not force and model in self._show_cache:
+            return self._show_cache[model]
+        client = self._get_client()
+        resp = await client.show(model=model)
+        d = self._normalize_show(resp, model)
+        self._show_cache[model] = d
+        return d
