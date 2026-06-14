@@ -548,3 +548,48 @@ def test_post_callback_gives_up_after_retries(caplog):
         assert any("Callback POST" in r.message for r in caplog.records)
     finally:
         h.close()
+
+
+def test_ollama_adapter_memoizes_show_and_pull():
+    """A long-running worker must not re-`show`/`pull` a model on every job.
+    The OllamaAdapter caches per-model presence + info for the process; the
+    first job's presence-check seeds the show cache so a same-job show_model is
+    free, and subsequent jobs do zero model round-trips. Uses a fake client
+    (no Ollama)."""
+    import asyncio
+
+    from hoglah.adapters import OllamaAdapter
+    from hoglah.models import JobRequest
+
+    calls = {"show": 0, "pull": 0, "generate": 0}
+
+    class FakeClient:
+        async def show(self, model):
+            calls["show"] += 1
+            return {"name": model, "parameters": "num_ctx 4096"}
+
+        async def pull(self, model):
+            calls["pull"] += 1
+
+        async def generate(self, **kwargs):
+            calls["generate"] += 1
+            return {"response": "ok", "prompt_eval_count": 1, "eval_count": 1, "done_reason": "stop"}
+
+    ad = OllamaAdapter()
+    ad._get_client = lambda: FakeClient()  # bypass real ollama client + loop logic
+
+    async def run_twice():
+        req = JobRequest(model="m", prompt="hi", max_retries=0)
+        await ad.run(req)
+        await ad.run(req)
+
+    asyncio.run(run_twice())
+    assert calls["generate"] == 2
+    # Two jobs, same model → exactly one show (job 1's presence-check, which
+    # also seeds the show cache); job 2 does none. No pull (model "present").
+    assert calls["show"] == 1
+    assert calls["pull"] == 0
+
+    # force=True bypasses the cache.
+    asyncio.run(ad.show_model("m", force=True))
+    assert calls["show"] == 2

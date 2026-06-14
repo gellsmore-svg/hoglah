@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.3.1] - 2026-06-14
+
+### Changed
+- **OllamaAdapter memoizes model presence + info per process.** The hot path
+  previously did two `client.show()` round-trips per job (one in `pull_model`,
+  one in `show_model`); a long-running worker now does one on a model's first
+  job (the presence-check seeds the show cache) and zero thereafter. Per-model,
+  process-lifetime; `pull_model(..., force=True)` / `show_model(..., force=True)`
+  bypass, and a fresh CLI process always starts cold. Test added (no Ollama).
+
 ## [0.3.0] - 2026-06-13
 
 ### Added
