@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoglah"
-version = "0.3.3"
+version = "0.4.0"
 description = "Lightweight local-first job queue manager and Ollama wrapper for resource-constrained environments."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -49,6 +49,9 @@ dev = [
 ]
 cli = [
     "typer>=0.12",   # nice CLI; can fall back to argparse if preferred
+]
+mongo = [
+    "pymongo>=4.6",  # MongoJobStore backend (backend="mongo")
 ]
 
 [project.scripts]

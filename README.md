@@ -41,6 +41,8 @@ Named after one of the daughters of Zelophehad (Numbers 26/27/36, Joshua 17), co
 pip install hoglah
 # With the CLI
 pip install "hoglah[cli]"
+# With the MongoDB backend (optional — adds pymongo)
+pip install "hoglah[mongo]"
 ```
 Hoglah is published on PyPI: https://pypi.org/project/hoglah/
 
@@ -124,6 +126,59 @@ hoglah rm <job-id> --yes  # remove specific job
 hoglah wait <job-id> --timeout 60 --json  # block until done, machine readable
 hoglah doctor --real  # diagnose setup and real Ollama/llama.cpp connectivity
 hoglah status <job-id> --json
+```
+
+## Backends
+
+Hoglah stores jobs through a pluggable `JobStore`. Two are built in; the default
+needs no setup.
+
+### SQLite (default)
+
+A single file (`~/.hoglah/hoglah.db` by default), zero extra dependencies. Best
+for one machine. The store uses write-ahead logging + a busy timeout so a
+submitter and the worker can share the file without "database is locked" errors.
+
+```python
+h = Hoglah()  # SQLite at ~/.hoglah/hoglah.db
+h = Hoglah(config={"db_path": "/data/queue.db"})
+```
+
+### MongoDB (optional)
+
+Point Hoglah at a MongoDB **server** instead. Install the extra (`pymongo`):
+
+```bash
+pip install "hoglah[mongo]"
+```
+
+```python
+h = Hoglah(config={
+    "backend": "mongo",
+    "mongo_uri": "mongodb://localhost:27017",  # default
+    "mongo_db": "hoglah",                       # default
+    "mongo_collection": "jobs",                 # default
+})
+# or via environment:
+#   HOGLAH_BACKEND=mongo HOGLAH_MONGO_URI=mongodb://host:27017
+```
+
+Everything else — `submit`, `wait`, the CLI, callbacks, recovery — works
+identically. Use Mongo when you want:
+
+- **No single-file lock.** A server has no SQLite file-locking concern, and job
+  claiming is atomic server-side (`find_one_and_update`), so **multiple workers,
+  even on different machines**, can drain one shared queue and still run each job
+  exactly once.
+- **External visibility.** Jobs are stored as native documents (request, result
+  and tags are sub-documents, not opaque JSON blobs), so you can watch the queue
+  live from `mongosh` or Compass:
+
+  ```js
+  use hoglah
+  db.jobs.find({ status: "queued" }).sort({ priority: -1, created_at: 1 })
+  db.jobs.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }])
+  ```
 
 ## V1 Scope
 
@@ -186,6 +241,7 @@ RUN_OLLAMA_TESTS=1 python -m pytest tests/test_worker_execution.py::test_real_ol
 OLLAMA_HOST="http://$(ip route show default | awk '{print $3}'):11434" \
   RUN_OLLAMA_TESTS=1 python scripts/test_packaged_install.py
 ```
+```bash
 hoglah cancel <job-id>
 hoglah models
 hoglah run --real                # foreground worker using real Ollama

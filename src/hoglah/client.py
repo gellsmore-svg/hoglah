@@ -141,9 +141,14 @@ class Hoglah:
         # In-memory direct callbacks (only for jobs submitted in *this* process lifetime)
         self._direct_callbacks: dict[str, JobCallback] = {}
 
-        # Store (pluggable)
+        # Store (pluggable): explicit store= wins; else pick by config.backend.
         if store is not None:
             self._store: JobStore = store
+        elif self.config.backend == "mongo":
+            from .mongo_store import create_mongo_store
+            self._store = create_mongo_store(
+                self.config.mongo_uri, self.config.mongo_db, self.config.mongo_collection
+            )
         else:
             self._store = create_sqlite_store(self.config.db_path)
 
