@@ -45,8 +45,16 @@ class JobStore(Protocol):
         *,
         job_id: str | None = None,
         callback_key: str | None = None,
+        correlation_id: str | None = None,
     ) -> str:
-        """Persist a new job and return its ID. Status starts as QUEUED."""
+        """Persist a new job and return its ID. Status starts as QUEUED.
+
+        If `correlation_id` is given it is stored under a UNIQUE constraint and
+        enqueue becomes **idempotent**: re-enqueuing the same correlation_id is a
+        no-op that returns the existing job's id. This is what makes the Kafka
+        bridge's at-least-once redelivery safe (ADR-018) — a message redelivered
+        after a crash never creates a duplicate job.
+        """
         ...
 
     def get(self, job_id: str) -> dict[str, Any] | None:
@@ -108,6 +116,18 @@ class JobStore(Protocol):
         """Delete a single job by ID. Returns True if a job was deleted."""
         ...
 
+    def mark_result_published(self, job_id: str) -> None:
+        """Mark a terminal job's result as externally published (Kafka egress
+        outbox, ADR-018). Set only AFTER the broker acks, so a crash before this
+        leaves the job eligible for restart re-emit (transactional outbox)."""
+        ...
+
+    def list_unpublished_terminal(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return terminal jobs (with a result) not yet marked published. Used on
+        startup to re-emit results that the previous process may have computed
+        but not yet delivered to Kafka before crashing (ADR-018)."""
+        ...
+
 
 class SQLiteJobStore:
     """SQLite-backed JobStore (default implementation).
@@ -161,13 +181,32 @@ class SQLiteJobStore:
                     result_json TEXT,
                     error TEXT,
                     callback_key TEXT,
-                    tags_json TEXT
+                    tags_json TEXT,
+                    correlation_id TEXT,
+                    result_published INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            # Migrate older DBs created before the Kafka-bridge columns existed
+            # (ADR-018): add any missing column in place. Cheap + idempotent.
+            existing_cols = {
+                r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "correlation_id" not in existing_cols:
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN correlation_id TEXT")
+            if "result_published" not in existing_cols:
+                self._conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN result_published INTEGER NOT NULL DEFAULT 0"
+                )
             # Helpful indexes for common queries
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority DESC, created_at)")
+            # UNIQUE on correlation_id (when present) gives idempotent enqueue:
+            # a redelivered Kafka message can never create a second job.
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_correlation "
+                "ON jobs(correlation_id) WHERE correlation_id IS NOT NULL"
+            )
             self._conn.commit()
 
     def _row_to_dict(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -189,6 +228,7 @@ class SQLiteJobStore:
         *,
         job_id: str | None = None,
         callback_key: str | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         if job_id is None:
             job_id = new_job_id()
@@ -197,25 +237,47 @@ class SQLiteJobStore:
         tags = request.tags or []
 
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO jobs (
-                    id, status, priority, created_at, updated_at,
-                    request_json, result_json, error, callback_key, tags_json
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
-                """,
-                (
-                    job_id,
-                    JobStatus.QUEUED.value,
-                    request.priority,
-                    now,
-                    now,
-                    json.dumps(asdict(request), default=str),
-                    callback_key,
-                    json.dumps(tags),
-                ),
-            )
-            self._conn.commit()
+            # Idempotency: if this correlation_id is already enqueued, return the
+            # existing job's id without inserting (the Kafka redelivery case).
+            if correlation_id is not None:
+                row = self._conn.execute(
+                    "SELECT id FROM jobs WHERE correlation_id = ?", (correlation_id,)
+                ).fetchone()
+                if row is not None:
+                    return row["id"]
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO jobs (
+                        id, status, priority, created_at, updated_at,
+                        request_json, result_json, error, callback_key, tags_json,
+                        correlation_id, result_published
+                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0)
+                    """,
+                    (
+                        job_id,
+                        JobStatus.QUEUED.value,
+                        request.priority,
+                        now,
+                        now,
+                        json.dumps(asdict(request), default=str),
+                        callback_key,
+                        json.dumps(tags),
+                        correlation_id,
+                    ),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                # Lost a race on the UNIQUE(correlation_id) index (another
+                # thread/process inserted the same correlation_id concurrently).
+                # The other insert won; return its id — still exactly one job.
+                self._conn.rollback()
+                row = self._conn.execute(
+                    "SELECT id FROM jobs WHERE correlation_id = ?", (correlation_id,)
+                ).fetchone()
+                if row is not None:
+                    return row["id"]
+                raise
         return job_id
 
     def get(self, job_id: str) -> dict[str, Any] | None:
@@ -356,6 +418,31 @@ class SQLiteJobStore:
             cur = self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             self._conn.commit()
         return cur.rowcount > 0
+
+    def mark_result_published(self, job_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE jobs SET result_published = 1 WHERE id = ?", (job_id,)
+            )
+            self._conn.commit()
+
+    def list_unpublished_terminal(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        terminal = (JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value)
+        placeholders = ",".join("?" * len(terminal))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM jobs
+                WHERE status IN ({placeholders})
+                  AND result_json IS NOT NULL
+                  AND result_published = 0
+                  AND correlation_id IS NOT NULL
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                (*terminal, limit),
+            ).fetchall()
+        return [d for r in rows if (d := self._row_to_dict(r)) is not None]
 
 
 # Convenience factory (used by client)

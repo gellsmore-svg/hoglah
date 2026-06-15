@@ -54,6 +54,35 @@ class HoglahSettings(BaseSettings):
     mongo_db: str = Field(default="hoglah", description="MongoDB database name (backend='mongo').")
     mongo_collection: str = Field(default="jobs", description="MongoDB collection name (backend='mongo').")
 
+    # Kafka bridge (ADR-018) — transport adapter, NOT a storage backend. When
+    # enabled, Hoglah consumes job-request messages from an input topic into the
+    # JobStore and produces result messages back to Kafka. Off by default; needs
+    # the optional extra `pip install "hoglah[kafka]"`. See docs/kafka-bridge-design.md.
+    kafka_enabled: bool = Field(
+        default=False,
+        description="Enable the Kafka bridge (consume job requests + produce results). Off by default.",
+    )
+    kafka_bootstrap_servers: str = Field(
+        default="localhost:9092",
+        description="Comma-separated Kafka bootstrap servers (e.g. 'broker1:9092,broker2:9092').",
+    )
+    kafka_input_topic: str = Field(
+        default="hoglah-jobs",
+        description="Topic Hoglah consumes job requests from.",
+    )
+    kafka_results_topic: str = Field(
+        default="hoglah-results",
+        description="Default topic Hoglah produces results to (overridable per-message by reply_to).",
+    )
+    kafka_dlt_topic: str = Field(
+        default="hoglah-jobs-dlt",
+        description="Dead-letter topic for un-processable ('poison') input messages.",
+    )
+    kafka_group_id: str = Field(
+        default="hoglah",
+        description="Kafka consumer group id (members share the input-topic partitions).",
+    )
+
     # Concurrency control (ADR-003)
     concurrency: int = Field(
         default=1,

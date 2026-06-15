@@ -173,6 +173,10 @@ class Hoglah:
         self._inflight: dict[str, asyncio.Task] = {}
         self._worker_loop_ref: asyncio.AbstractEventLoop | None = None
 
+        # Kafka bridge (ADR-018), created below only when enabled + this instance
+        # runs the worker. None means "no Kafka", and _deliver/close skip it.
+        self._kafka_bridge: Any = None
+
         # Attempt restart callback re-delivery for jobs that completed while we were down
         self._redeliver_restart_callbacks()
 
@@ -190,6 +194,15 @@ class Hoglah:
         # or to act as a pure submitter into a shared queue (separate daemon executes).
         if start_worker:
             self._start_background_worker()
+
+        # Kafka bridge (ADR-018): consume job requests + produce results. Tied to
+        # start_worker — only an instance that actually processes jobs should
+        # ingest from / emit to Kafka. Optional dep, imported lazily.
+        if start_worker and getattr(self.config, "kafka_enabled", False):
+            from .kafka_bridge import KafkaBridge
+
+            self._kafka_bridge = KafkaBridge(store=self._store, config=self.config)
+            self._kafka_bridge.start()
 
     # ------------------------------------------------------------------ #
     # Public API (matches the spirit of the requirements submit signature)
@@ -786,6 +799,15 @@ class Hoglah:
                 name=f"hoglah-callback-{result.job_id[:8]}",
             ).start()
 
+        # ADR-018: third delivery sink — produce the result back to Kafka (for
+        # Kafka-originated jobs). The bridge no-ops for non-Kafka jobs and runs
+        # the actual produce on its own thread, so this never blocks the loop.
+        if self._kafka_bridge is not None:
+            try:
+                self._kafka_bridge.publish_result(result, request)
+            except Exception:
+                logger.exception("Kafka result delivery failed for job %s", result.job_id)
+
     def _post_callback(self, url: str, job_id: str, payload: str) -> None:
         """POST `payload` (a serialized JobResult) to `url`, retrying transient
         failures with exponential backoff. Best-effort: gives up after
@@ -839,6 +861,8 @@ class Hoglah:
     def close(self) -> None:
         """Stop worker and close resources."""
         self._worker_running = False
+        if self._kafka_bridge is not None:
+            self._kafka_bridge.stop()
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
         if hasattr(self._store, "close"):

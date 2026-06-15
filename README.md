@@ -43,6 +43,8 @@ pip install hoglah
 pip install "hoglah[cli]"
 # With the MongoDB backend (optional — adds pymongo)
 pip install "hoglah[mongo]"
+# With the Kafka bridge (optional — adds confluent-kafka)
+pip install "hoglah[kafka]"
 ```
 Hoglah is published on PyPI: https://pypi.org/project/hoglah/
 
@@ -179,6 +181,63 @@ identically. Use Mongo when you want:
   db.jobs.find({ status: "queued" }).sort({ priority: -1, created_at: 1 })
   db.jobs.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }])
   ```
+
+## Kafka bridge (optional)
+
+Hoglah can bridge an existing Apache Kafka deployment **without owning the
+cluster**: it consumes job-request messages from an input topic into the durable
+queue, processes them with the normal serial worker, and produces result
+messages back to Kafka. It is a *transport adapter*, not a storage backend — the
+SQLite/Mongo store remains the source of truth, and Kafka is a third decoupled
+delivery mechanism alongside the output folder and HTTP callback.
+
+```bash
+pip install "hoglah[kafka]"
+# run the worker + bridge in the foreground (Ctrl-C to stop)
+hoglah kafka-bridge --bootstrap-servers localhost:9092 \
+                    --input-topic hoglah-jobs --results-topic hoglah-results
+```
+
+Or from the library / env:
+
+```python
+h = Hoglah(config={
+    "kafka_enabled": True,
+    "kafka_bootstrap_servers": "localhost:9092",
+    "kafka_input_topic": "hoglah-jobs",
+    "kafka_results_topic": "hoglah-results",   # overridable per-message by reply_to
+})
+# env equivalent: HOGLAH_KAFKA_ENABLED=1 HOGLAH_KAFKA_BOOTSTRAP_SERVERS=...
+```
+
+**Input message** (JSON on `hoglah-jobs`): a unique `correlation_id` is required
+and doubles as the idempotency key.
+
+```json
+{ "correlation_id": "9b1c…", "model": "gemma3:1b", "prompt": "…",
+  "options": { "temperature": 0.7 }, "reply_to": "team-x-replies" }
+```
+
+**Output message** (on `hoglah-results` or the request's `reply_to`) echoes the
+`correlation_id` so async callers can match it:
+
+```json
+{ "correlation_id": "9b1c…", "job_id": "…", "status": "completed",
+  "output": "…", "error": null }
+```
+
+**Crash safety is built in** (see `docs/kafka-bridge-design.md`):
+- *Ingress* commits the Kafka offset only **after** a durable, idempotent enqueue
+  keyed on `correlation_id` — a redelivery after a crash is a harmless no-op
+  (no lost or duplicated jobs).
+- *Egress* uses a transactional outbox — a result is marked published only after
+  the broker acks; on restart, computed-but-unpublished results are re-emitted.
+- Poison (un-parseable) messages go to a dead-letter topic so they never block a
+  partition.
+
+Scale horizontally by running several `hoglah kafka-bridge` processes in one
+consumer group; each keeps its own serial worker. Sharing one MongoDB store
+gives fleet-wide exactly-once execution via the server-side atomic claim.
 
 ## V1 Scope
 

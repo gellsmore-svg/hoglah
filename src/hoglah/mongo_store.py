@@ -65,6 +65,13 @@ class MongoJobStore:
         # an unfiltered list()'s sort. create_index is idempotent.
         self._col.create_index([("status", ASCENDING), ("priority", DESCENDING), ("created_at", ASCENDING)])
         self._col.create_index([("priority", DESCENDING), ("created_at", ASCENDING)])
+        # UNIQUE on correlation_id (only for docs that have one) gives idempotent
+        # enqueue: a redelivered Kafka message can't create a second job (ADR-018).
+        self._col.create_index(
+            [("correlation_id", ASCENDING)],
+            unique=True,
+            partialFilterExpression={"correlation_id": {"$exists": True}},
+        )
 
     def _doc_to_dict(self, doc: dict[str, Any] | None) -> dict[str, Any] | None:
         if doc is None:
@@ -97,24 +104,43 @@ class MongoJobStore:
         *,
         job_id: str | None = None,
         callback_key: str | None = None,
+        correlation_id: str | None = None,
     ) -> str:
+        from pymongo.errors import DuplicateKeyError
+
         if job_id is None:
             job_id = new_job_id()
         now = _now_iso()
-        self._col.insert_one(
-            {
-                "_id": job_id,
-                "status": JobStatus.QUEUED.value,
-                "priority": request.priority,
-                "created_at": now,
-                "updated_at": now,
-                "request": _bson_safe(asdict(request)),
-                "result": None,
-                "error": None,
-                "callback_key": callback_key,
-                "tags": list(request.tags or []),
-            }
-        )
+        # Idempotency: a correlation_id already present means this is a Kafka
+        # redelivery — return the existing job's id without inserting.
+        if correlation_id is not None:
+            existing = self._col.find_one({"correlation_id": correlation_id}, {"_id": 1})
+            if existing is not None:
+                return existing["_id"]
+        doc: dict[str, Any] = {
+            "_id": job_id,
+            "status": JobStatus.QUEUED.value,
+            "priority": request.priority,
+            "created_at": now,
+            "updated_at": now,
+            "request": _bson_safe(asdict(request)),
+            "result": None,
+            "error": None,
+            "callback_key": callback_key,
+            "tags": list(request.tags or []),
+            "result_published": False,
+        }
+        if correlation_id is not None:
+            doc["correlation_id"] = correlation_id
+        try:
+            self._col.insert_one(doc)
+        except DuplicateKeyError:
+            # Lost a race on the unique correlation_id index; the other insert
+            # won. Return its id — still exactly one job.
+            existing = self._col.find_one({"correlation_id": correlation_id}, {"_id": 1})
+            if existing is not None:
+                return existing["_id"]
+            raise
         return job_id
 
     def get(self, job_id: str) -> dict[str, Any] | None:
@@ -210,6 +236,31 @@ class MongoJobStore:
 
     def delete_job(self, job_id: str) -> bool:
         return self._col.delete_one({"_id": job_id}).deleted_count > 0
+
+    def mark_result_published(self, job_id: str) -> None:
+        self._col.update_one({"_id": job_id}, {"$set": {"result_published": True}})
+
+    def list_unpublished_terminal(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        from pymongo import ASCENDING
+
+        terminal = [
+            JobStatus.COMPLETED.value,
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+        ]
+        cursor = (
+            self._col.find(
+                {
+                    "status": {"$in": terminal},
+                    "result": {"$ne": None},
+                    "result_published": {"$ne": True},
+                    "correlation_id": {"$exists": True},
+                }
+            )
+            .sort([("updated_at", ASCENDING)])
+            .limit(limit)
+        )
+        return [d for doc in cursor if (d := self._doc_to_dict(doc)) is not None]
 
 
 def create_mongo_store(

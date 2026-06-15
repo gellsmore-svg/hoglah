@@ -533,6 +533,51 @@ def run(
         h.close()
 
 
+@app.command("kafka-bridge")
+def kafka_bridge(
+    db: Path | None = typer.Option(None, "--db"),
+    real: bool = typer.Option(False, "--real", help="Use the real Ollama adapter"),
+    ollama_host: str | None = typer.Option(None, "--ollama-host"),
+    bootstrap_servers: str | None = typer.Option(None, "--bootstrap-servers", help="Kafka brokers, e.g. localhost:9092"),
+    input_topic: str | None = typer.Option(None, "--input-topic"),
+    results_topic: str | None = typer.Option(None, "--results-topic"),
+    group_id: str | None = typer.Option(None, "--group-id"),
+    backend: str | None = typer.Option(None, "--backend", help="Storage backend: sqlite (default) or mongo"),
+) -> None:
+    """Run the worker + Kafka bridge in the foreground (ADR-018).
+
+    Consumes job requests from the input topic into the durable queue, processes
+    them with the serial worker, and produces results back to Kafka. Blocks until
+    interrupted. Requires `pip install "hoglah[kafka]"`.
+    """
+    cfg: dict[str, Any] = {"kafka_enabled": True}
+    if db:
+        cfg["db_path"] = db
+    if backend:
+        cfg["backend"] = backend
+    if ollama_host:
+        cfg["ollama_host"] = ollama_host
+    if bootstrap_servers:
+        cfg["kafka_bootstrap_servers"] = bootstrap_servers
+    if input_topic:
+        cfg["kafka_input_topic"] = input_topic
+    if results_topic:
+        cfg["kafka_results_topic"] = results_topic
+    if group_id:
+        cfg["kafka_group_id"] = group_id
+
+    h = Hoglah(config=cfg, use_real=real)
+
+    typer.secho("Hoglah Kafka bridge running (foreground). Press Ctrl-C to stop.", fg=typer.colors.BLUE)
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        typer.secho("\nShutting down...", fg=typer.colors.YELLOW)
+    finally:
+        h.close()
+
+
 @app.command()
 def models(
     db: Path | None = typer.Option(None, "--db", help="(unused for models but accepted for uniformity)"),

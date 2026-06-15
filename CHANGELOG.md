@@ -10,6 +10,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.5.0] - 2026-06-15
+
+### Added
+- **Kafka bridge (ADR-018).** Optional transport adapter that consumes job
+  requests from a Kafka input topic into the durable queue and produces result
+  messages back to Kafka — without Hoglah owning the cluster. Enable with
+  `kafka_enabled=True` (or `HOGLAH_KAFKA_ENABLED=1`); `confluent-kafka` is an
+  optional extra (`pip install "hoglah[kafka]"`), lazy-imported so non-Kafka
+  users and the default path are unaffected. New CLI: `hoglah kafka-bridge`
+  (worker + bridge in the foreground). Composes with either storage backend.
+  **Kafka is a transport adapter, not a `JobStore` backend** — the existing
+  SQLite/Mongo store stays the source of truth; Kafka is a third decoupled
+  delivery sink (sibling of the ADR-014 output folder and ADR-015 HTTP callback)
+  extended to also cover ingress.
+- **Crash safety is built in, not best-effort:**
+  - *Ingress* — idempotent-consumer pattern: the Kafka offset is committed only
+    AFTER a durable enqueue, and enqueue is idempotent on the message's
+    `correlation_id`. A redelivery after a crash in the enqueue→commit window is
+    a harmless no-op (at-least-once + idempotent = no loss, no duplication).
+  - *Egress* — transactional outbox: a result is marked published only after the
+    broker acks it; on startup, terminal jobs computed but not yet published are
+    re-emitted (`republish_unpublished`). With an idempotent producer +
+    consumer-side `correlation_id` de-dup this is exactly-once *effect* end to end.
+  - Poison messages are routed to a dead-letter topic and the offset committed,
+    so one bad message never blocks a partition.
+
+### Changed
+- **`JobStore` contract gained three crash-safety primitives**, implemented in
+  both `SQLiteJobStore` and `MongoJobStore`: `enqueue(..., correlation_id=...)`
+  is now idempotent (new UNIQUE `correlation_id` column/index); plus
+  `mark_result_published()` and `list_unpublished_terminal()` for the outbox.
+  Existing callers are unaffected (`correlation_id` defaults to None). SQLite
+  databases created by earlier versions are migrated in place (the two new
+  columns are added on open).
+
+### Tests
+- 12 Kafka tests: 11 crash-scenario unit tests against a deterministic in-memory
+  fake transport (idempotent ingress, enqueue-then-commit ordering, crash/redeliver
+  safety, poison→DLT, outbox re-emit + ack-then-mark), plus a gated
+  (`RUN_KAFKA_TESTS=1`) real-broker end-to-end round-trip.
+
 ## [0.4.1] - 2026-06-15
 
 Hardening from a read-only code review of the 0.4.0 MongoDB backend (no
@@ -226,6 +267,7 @@ Critical findings; these close the Should-fix / Nice-to-have items).
 - Tests for persistence, callbacks, worker execution via stub.
 - Initial docs, requirements capture, architecture decisions.
 
+[0.5.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/gellsmore-svg/hoglah/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.3.3...v0.4.0
 [0.2.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.1.0...v0.2.0
