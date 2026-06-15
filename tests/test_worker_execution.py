@@ -593,3 +593,40 @@ def test_ollama_adapter_memoizes_show_and_pull():
     # force=True bypasses the cache.
     asyncio.run(ad.show_model("m", force=True))
     assert calls["show"] == 2
+
+
+def test_cancel_interrupts_in_flight_job():
+    """cancel() interrupts a job that is already running (cross-thread task
+    cancel), not just one still queued. The CANCELLED result stands and the
+    adapter's work is cut short. Slow StubAdapter subclass — no Ollama."""
+    import time
+
+    completed = {"flag": False}
+
+    class SlowAdapter(StubAdapter):
+        async def run(self, request):
+            await asyncio.sleep(5)  # long enough to cancel mid-run
+            completed["flag"] = True  # only set if NOT interrupted
+            return await super().run(request)
+
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db}, adapter=SlowAdapter(), start_worker=True)
+    try:
+        jid = h.submit(prompt="hi", model="stub", max_retries=0)
+        # wait until the worker has claimed it (now executing / in-flight)
+        deadline = time.time() + 6
+        while h.get(jid).status != JobStatus.PROCESSING:
+            if time.time() > deadline:
+                raise AssertionError("job never reached PROCESSING")
+            time.sleep(0.05)
+
+        assert h.cancel(jid) is True
+        time.sleep(0.6)  # let the cross-thread interrupt land
+
+        res = h.get(jid)
+        assert res.status == JobStatus.CANCELLED
+        assert res.error == "Cancelled by user"
+        # The slow run was interrupted before its 5s sleep finished.
+        assert completed["flag"] is False
+    finally:
+        h.close()

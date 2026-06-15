@@ -162,6 +162,11 @@ class Hoglah:
         # Worker control (for background asyncio loop in daemon thread)
         self._worker_running = False
         self._worker_thread: threading.Thread | None = None
+        # In-flight job tasks keyed by job_id, and a reference to the worker's
+        # event loop, so cancel() (called from the main thread) can interrupt a
+        # running job cross-thread via loop.call_soon_threadsafe(task.cancel).
+        self._inflight: dict[str, asyncio.Task] = {}
+        self._worker_loop_ref: asyncio.AbstractEventLoop | None = None
 
         # Attempt restart callback re-delivery for jobs that completed while we were down
         self._redeliver_restart_callbacks()
@@ -382,10 +387,13 @@ class Hoglah:
         return JobStatus(row["status"])
 
     def cancel(self, job_id: str) -> bool:
-        """Best-effort cancellation.
+        """Cancel a job. If it is currently running in this process's worker,
+        the in-flight generation is interrupted (cross-thread task cancel);
+        otherwise it is simply marked CANCELLED before it starts.
 
-        Marks the job CANCELLED. A running worker (future) may still finish
-        the current generation; true mid-generation interrupt is best-effort.
+        The CANCELLED result is recorded first, so even if the running task
+        finishes a hair before the interrupt lands, _process_job's race guard
+        refuses to overwrite the cancellation.
         """
         row = self._store.get(job_id)
         if row is None:
@@ -405,6 +413,16 @@ class Hoglah:
         )
         self._store.set_result(job_id, result)
         self._deliver(result)
+
+        # If the job is executing in our worker, interrupt it on the worker's
+        # loop (cancel() runs on the main thread; the task lives on another).
+        task = self._inflight.get(job_id)
+        loop = self._worker_loop_ref
+        if task is not None and loop is not None and not task.done():
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                pass  # worker loop already stopping; CANCELLED result still stands
         return True
 
     def wait(self, job_id: str, timeout: float | None = None) -> JobResult:
@@ -491,10 +509,10 @@ class Hoglah:
     async def _worker_loop(self) -> None:
         sem = asyncio.Semaphore(self.config.concurrency)
         poll_interval = 0.5
-        # Track in-flight job tasks so shutdown can drain them instead of
-        # destroying the loop mid-generation. (Jobs are already time-bounded
-        # by timeout_seconds; this just lets near-done ones finish cleanly.)
-        inflight: set[asyncio.Task] = set()
+        # Publish this loop so cancel() (main thread) can interrupt in-flight
+        # tasks cross-thread. In-flight tasks are tracked per job_id (on self)
+        # for both targeted cancel and the shutdown drain.
+        self._worker_loop_ref = asyncio.get_running_loop()
 
         while self._worker_running:
             try:
@@ -507,8 +525,8 @@ class Hoglah:
                     # Acquire slot and process (fire and forget the task)
                     await sem.acquire()
                     task = asyncio.create_task(self._process_job(job_id, sem))
-                    inflight.add(task)
-                    task.add_done_callback(inflight.discard)
+                    self._inflight[job_id] = task
+                    task.add_done_callback(lambda _t, jid=job_id: self._inflight.pop(jid, None))
 
                 await asyncio.sleep(poll_interval)
             except asyncio.CancelledError:
@@ -520,7 +538,7 @@ class Hoglah:
         # Graceful drain on shutdown: let in-flight jobs finish within a
         # bounded window (under close()'s 3s thread-join), then cancel any
         # stragglers so set_result still records a terminal state.
-        pending = {t for t in inflight if not t.done()}
+        pending = {t for t in self._inflight.values() if not t.done()}
         if pending:
             done, still = await asyncio.wait(pending, timeout=_SHUTDOWN_DRAIN_SECONDS)
             for t in still:
@@ -545,6 +563,13 @@ class Hoglah:
             # Execute with retries
             result = await self._execute_with_retries(job_id, request)
 
+            # Race guard: if cancel() flipped this job to CANCELLED while it ran
+            # (and we finished before the task-cancel landed), do NOT overwrite
+            # the cancellation with the computed result.
+            latest = self._store.get(job_id)
+            if latest and JobStatus(latest["status"]) == JobStatus.CANCELLED:
+                return
+
             # Persist final result
             self._store.set_result(job_id, result)
 
@@ -554,6 +579,11 @@ class Hoglah:
             # Fire callback (direct if present for this process, else via registry)
             self._fire_callback(job_id, result, callback_key)
 
+        except asyncio.CancelledError:
+            # cancel() interrupted this job mid-run. The CANCELLED result is
+            # already recorded by cancel(); end quietly without overwriting it.
+            # (Distinct from `except Exception` so it never becomes a FAILED.)
+            return
         except Exception:
             logger.exception("Unexpected error processing job %s", job_id)
             # Best effort: record failure
