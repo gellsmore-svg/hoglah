@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.3.3] - 2026-06-15
+
+### Fixed
+- **Cancel can no longer be clobbered by the generic-exception path.** The
+  `except Exception` branch in `_process_job` now re-checks status and won't
+  overwrite a CANCELLED job with FAILED (matches the success-path race guard).
+- **Worker no longer double-spawns a task for an in-flight job.** The poll loop
+  skips a `job_id` already in `self._inflight` (a task created on a prior poll
+  may not have claimed the job yet, so it can still read as QUEUED) — previously
+  a second task could overwrite the in-flight entry and make `cancel()` target
+  the wrong task.
+
+### Docs
+- Corrected the shutdown-drain comment: cancelled stragglers are intentionally
+  left PROCESSING and re-queued for retry by startup recovery (DQ-004); no
+  terminal result is written there (the prior comment wrongly implied one was).
+
+(Findings from a read-only code review of the 0.3.2 hardening.)
+
 ## [0.3.2] - 2026-06-15
 
 ### Changed

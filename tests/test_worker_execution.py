@@ -630,3 +630,32 @@ def test_cancel_interrupts_in_flight_job():
         assert completed["flag"] is False
     finally:
         h.close()
+
+
+def test_cancel_wins_over_a_failing_job():
+    """A cancelled job must end CANCELLED even if its execution would otherwise
+    error — neither the CancelledError path nor the generic-exception path may
+    overwrite the cancellation with FAILED. (Guards added in 0.3.3.)"""
+    import time
+
+    class SlowRaiseAdapter(StubAdapter):
+        async def run(self, request):
+            await asyncio.sleep(3)
+            raise RuntimeError("boom")  # if it ran uninterrupted it would FAIL
+
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db}, adapter=SlowRaiseAdapter(), start_worker=True)
+    try:
+        jid = h.submit(prompt="x", model="stub", max_retries=0)
+        deadline = time.time() + 6
+        while h.get(jid).status != JobStatus.PROCESSING:
+            if time.time() > deadline:
+                raise AssertionError("never reached PROCESSING")
+            time.sleep(0.05)
+        assert h.cancel(jid) is True
+        time.sleep(0.6)
+        res = h.get(jid)
+        assert res.status == JobStatus.CANCELLED
+        assert res.error == "Cancelled by user"
+    finally:
+        h.close()
