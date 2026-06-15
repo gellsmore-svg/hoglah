@@ -36,10 +36,23 @@ class HoglahSettings(BaseSettings):
     )
 
     # Persistence (SQLite by default per ADR-002)
+    backend: str = Field(
+        default="sqlite",
+        description="Persistence backend: 'sqlite' (default, single-file) or 'mongo' "
+        "(MongoDB server — multi-process/multi-machine workers, external queue visibility).",
+    )
     db_path: Path = Field(
         default=Path("~/.hoglah/hoglah.db").expanduser(),
-        description="Path to the SQLite database file. Parent dir will be created if needed.",
+        description="Path to the SQLite database file (backend='sqlite'). Parent dir created if needed.",
     )
+    # MongoDB backend connection (used when backend='mongo'). pymongo is an
+    # optional dependency: install with `pip install 'hoglah[mongo]'`.
+    mongo_uri: str = Field(
+        default="mongodb://localhost:27017",
+        description="MongoDB connection URI (backend='mongo').",
+    )
+    mongo_db: str = Field(default="hoglah", description="MongoDB database name (backend='mongo').")
+    mongo_collection: str = Field(default="jobs", description="MongoDB collection name (backend='mongo').")
 
     # Concurrency control (ADR-003)
     concurrency: int = Field(

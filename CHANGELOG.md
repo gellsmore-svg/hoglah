@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.4.0] - 2026-06-15
+
+### Added
+- **MongoDB backend (ADR-017 — fulfils the ADR-002 option / DQ-010 promise).**
+  A drop-in `MongoJobStore` selected with `Hoglah(config={"backend": "mongo", ...})`
+  or `HOGLAH_BACKEND=mongo` (configurable `mongo_uri` / `mongo_db` / `mongo_collection`;
+  defaults `mongodb://localhost:27017` / `hoglah` / `jobs`). `pymongo` is an
+  **optional** dependency — `pip install "hoglah[mongo]"` — imported lazily, so
+  SQLite users never need it and the default stays SQLite. Why a server backend:
+  - **No single-file lock.** A Mongo server sidesteps SQLite's file locking, so
+    the WAL / `busy_timeout` dance does not apply. `claim_for_processing` is
+    atomic server-side via `find_one_and_update` (QUEUED → PROCESSING), so
+    concurrent workers — even on different machines — still execute each job once.
+  - **External queue visibility.** Jobs are stored as native documents (request /
+    result / tags are sub-documents, not opaque JSON blobs), so the queue is
+    directly inspectable from `mongosh`, Compass, or any other service.
+  - **Multi-machine workers** can share one queue over the network.
+  Returned rows mirror `SQLiteJobStore` exactly (parsed `request`/`result`/`tags`
+  plus the raw `*_json` strings the client also reads), so it is a true drop-in.
+  Validated by a gated contract test **and** a full client end-to-end test against
+  a real local MongoDB (`RUN_MONGO_TESTS=1`, throwaway collection).
+
 ## [0.3.3] - 2026-06-15
 
 ### Fixed
@@ -175,4 +197,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests for persistence, callbacks, worker execution via stub.
 - Initial docs, requirements capture, architecture decisions.
 
+[0.4.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.3.3...v0.4.0
 [0.2.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.1.0...v0.2.0
