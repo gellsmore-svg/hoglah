@@ -10,6 +10,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.5.1] - 2026-06-15
+
+Hardening of the v0.5.0 Kafka bridge from a read-only code review. The review
+confirmed the transactional-safety claim HOLDS for the job pipeline; these close
+its one Critical finding plus the meaningful Should-fixes and test gaps.
+
+### Fixed
+- **Critical: a poison message is no longer committed past a *failed* dead-letter
+  write.** `_to_dead_letter` now reports success/failure and the input offset is
+  committed only on a confirmed DLT ack; if the DLT produce fails the offset is
+  left uncommitted so the message is retried (never silently lost).
+- **No double egress on startup.** The bridge now drains the egress outbox
+  (`prime()`) *before* the worker starts, so a pre-existing terminal job can't be
+  published both by the outbox replay and by the worker's live `_deliver`.
+- **A failure mid-message-handle no longer kills the consumer thread.** The poll
+  loop wraps `_handle_message`: on error it logs, backs off, and leaves the
+  offset uncommitted (retry) instead of silently stopping all consumption.
+- **Post-ack `mark_result_published` failure is handled gracefully** — the result
+  is left in the outbox and re-emitted on restart rather than aborting recovery.
+
+### Changed
+- `republish_unpublished()` now drains the **full** outbox backlog in batches
+  (was capped at 500), stopping early only when it can make no progress.
+- `stop()` drains in-flight egress publishes (bounded wait) before closing the
+  producer, for a graceful shutdown.
+- Result messages now also carry `truncation_reason`, `tags`, and `parent_job_id`;
+  `reply_to` is validated as a string (a non-string routes to the dead-letter).
+
+### Tests
+- Added regressions for every fixed finding: poison-not-committed-on-DLT-failure
+  (the Critical), ack-then-mark crash → re-emit, the `publish_result` live thread
+  path, a 12-thread concurrent same-`correlation_id` enqueue race, and a gated
+  Mongo bridge idempotency test. Kafka suite: 11 → 18.
+
 ## [0.5.0] - 2026-06-15
 
 ### Added
@@ -267,6 +301,7 @@ Critical findings; these close the Should-fix / Nice-to-have items).
 - Tests for persistence, callbacks, worker execution via stub.
 - Initial docs, requirements capture, architecture decisions.
 
+[0.5.1]: https://github.com/gellsmore-svg/hoglah/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/gellsmore-svg/hoglah/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.3.3...v0.4.0

@@ -186,6 +186,18 @@ class Hoglah:
         # (start_worker=False) sharing the queue with a separate worker daemon
         # must NOT do this, or it would re-queue the daemon's in-flight jobs
         # and cause double processing.
+        # Kafka bridge (ADR-018): consume job requests + produce results. Tied to
+        # start_worker — only an instance that actually processes jobs should
+        # ingest from / emit to Kafka. Optional dep, imported lazily. Create and
+        # PRIME (drain the egress outbox) BEFORE the worker starts, so a
+        # pre-existing terminal job cannot be published twice — once by the
+        # outbox replay, once by the worker's live _deliver.
+        if start_worker and getattr(self.config, "kafka_enabled", False):
+            from .kafka_bridge import KafkaBridge
+
+            self._kafka_bridge = KafkaBridge(store=self._store, config=self.config)
+            self._kafka_bridge.prime()
+
         if start_worker:
             self._recover_interrupted_jobs()
 
@@ -195,14 +207,9 @@ class Hoglah:
         if start_worker:
             self._start_background_worker()
 
-        # Kafka bridge (ADR-018): consume job requests + produce results. Tied to
-        # start_worker — only an instance that actually processes jobs should
-        # ingest from / emit to Kafka. Optional dep, imported lazily.
-        if start_worker and getattr(self.config, "kafka_enabled", False):
-            from .kafka_bridge import KafkaBridge
-
-            self._kafka_bridge = KafkaBridge(store=self._store, config=self.config)
-            self._kafka_bridge.start()
+        # Worker is up and the outbox is drained — now start consuming input.
+        if self._kafka_bridge is not None:
+            self._kafka_bridge.start(skip_republish=True)
 
     # ------------------------------------------------------------------ #
     # Public API (matches the spirit of the requirements submit signature)

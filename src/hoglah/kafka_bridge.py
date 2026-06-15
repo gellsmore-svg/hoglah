@@ -103,6 +103,8 @@ def parse_input_message(value: bytes) -> ParsedInput:
         raise InvalidMessageError("must supply 'prompt' or 'messages'")
 
     reply_to = data.get("reply_to")
+    if reply_to is not None and not isinstance(reply_to, str):
+        raise InvalidMessageError("'reply_to' must be a string topic name")
     user_meta = data.get("metadata") or {}
     if not isinstance(user_meta, dict):
         raise InvalidMessageError("'metadata' must be an object")
@@ -148,6 +150,9 @@ def build_result_message(result_dict: dict[str, Any], correlation_id: str) -> by
         "embedding_dim": result_dict.get("embedding_dim"),
         "error": result_dict.get("error"),
         "truncated": result_dict.get("truncated"),
+        "truncation_reason": result_dict.get("truncation_reason"),
+        "tags": result_dict.get("tags"),
+        "parent_job_id": result_dict.get("parent_job_id"),
         "timings": result_dict.get("timings"),
         "metadata": meta,
     }
@@ -262,6 +267,10 @@ class KafkaBridge:
         self._transport = transport
         self._running = False
         self._thread: threading.Thread | None = None
+        # In-flight live-egress publishes, so stop() can drain them before the
+        # producer is closed.
+        self._egress_lock = threading.Lock()
+        self._egress_inflight = 0
 
     # -- lifecycle --------------------------------------------------------- #
 
@@ -274,14 +283,27 @@ class KafkaBridge:
             )
         return self._transport
 
-    def start(self) -> None:
+    def prime(self) -> None:
+        """Ensure the transport exists and drain the egress outbox. Call this
+        BEFORE the worker starts: re-emitting computed-but-unpublished results
+        must complete before the worker can produce new completions, otherwise a
+        pre-existing terminal job could be published twice (once here, once by
+        the worker's live _deliver)."""
         self._ensure_transport()
-        # Transactional-outbox recovery: re-emit results computed but not yet
-        # published before a previous crash, BEFORE consuming anything new.
         try:
             self.republish_unpublished()
         except Exception:
             logger.exception("Kafka outbox re-publish failed at startup")
+
+    def start(self, *, skip_republish: bool = False) -> None:
+        self._ensure_transport()
+        # Transactional-outbox recovery before consuming anything new (unless the
+        # caller already primed it — the client does so before the worker starts).
+        if not skip_republish:
+            try:
+                self.republish_unpublished()
+            except Exception:
+                logger.exception("Kafka outbox re-publish failed at startup")
         self._running = True
         self._thread = threading.Thread(
             target=self._consume_loop, daemon=True, name="hoglah-kafka-consumer"
@@ -298,6 +320,15 @@ class KafkaBridge:
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
+        # Drain in-flight live-egress publishes before closing the producer, so a
+        # produce_and_flush isn't racing transport.close(). (Post-ack crashes are
+        # already covered by the outbox; this just makes shutdown graceful.)
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            with self._egress_lock:
+                if self._egress_inflight == 0:
+                    break
+            time.sleep(0.05)
         if self._transport is not None:
             try:
                 self._transport.close()
@@ -320,7 +351,17 @@ class KafkaBridge:
             if msg.error is not None:
                 logger.warning("Kafka consume error: %s", msg.error)
                 continue
-            self._handle_message(msg)
+            try:
+                self._handle_message(msg)
+            except Exception:
+                # A store/transport failure mid-handle must not kill the consumer
+                # thread (which would silently stop all consumption). Leave the
+                # offset uncommitted so the message is retried, back off, continue.
+                logger.exception(
+                    "Failed handling Kafka message at %s[%d]@%d; not committing (will retry)",
+                    msg.topic, msg.partition, msg.offset,
+                )
+                time.sleep(0.5)
 
     def _handle_message(self, msg: KafkaMessage) -> None:
         """Process exactly one input message. Order is load-bearing for crash
@@ -332,15 +373,23 @@ class KafkaBridge:
                 "Poison message at %s[%d]@%d → dead-letter: %s",
                 msg.topic, msg.partition, msg.offset, exc,
             )
-            self._to_dead_letter(msg, str(exc))
-            self._safe_commit(msg)  # commit so the bad message can't block the partition
+            # Commit ONLY if the message was durably dead-lettered. If the DLT
+            # produce fails (e.g. broker down), leave the offset uncommitted so
+            # it is retried — committing past an un-dead-lettered message would
+            # lose it silently. This stalls the partition only while the DLT
+            # topic is unwritable, which is a broker-outage condition (the
+            # consumer can't make progress then anyway), not the poison itself.
+            if self._to_dead_letter(msg, str(exc)):
+                self._safe_commit(msg)
             return
         # Durable, idempotent enqueue. A crash here (before commit) means the
         # message is redelivered and re-enqueued as a no-op — never duplicated.
         self._store.enqueue(parsed.request, correlation_id=parsed.correlation_id)
         self._safe_commit(msg)
 
-    def _to_dead_letter(self, msg: KafkaMessage, reason: str) -> None:
+    def _to_dead_letter(self, msg: KafkaMessage, reason: str) -> bool:
+        """Produce a poison message to the dead-letter topic. Returns True only
+        on a confirmed broker ack (so the caller knows it is safe to commit)."""
         assert self._transport is not None
         payload = json.dumps(
             {
@@ -353,8 +402,10 @@ class KafkaBridge:
         ).encode("utf-8")
         try:
             self._transport.produce_and_flush(self._config.kafka_dlt_topic, msg.key, payload)
+            return True
         except Exception:
-            logger.exception("Failed to write poison message to dead-letter topic")
+            logger.exception("Failed to write poison message to dead-letter topic; will retry")
+            return False
 
     def _safe_commit(self, msg: KafkaMessage) -> None:
         assert self._transport is not None
@@ -379,17 +430,25 @@ class KafkaBridge:
         reply_to = kafka_meta.get("reply_to")
         result_dict = json.loads(json.dumps(asdict(result), default=str))
         value = build_result_message(result_dict, correlation_id)
+
+        def _run() -> None:
+            with self._egress_lock:
+                self._egress_inflight += 1
+            try:
+                self._publish_now(result.job_id, correlation_id, reply_to, value)
+            finally:
+                with self._egress_lock:
+                    self._egress_inflight -= 1
+
         threading.Thread(
-            target=self._publish_now,
-            args=(result.job_id, correlation_id, reply_to, value),
-            daemon=True,
-            name=f"hoglah-kafka-pub-{result.job_id[:8]}",
+            target=_run, daemon=True, name=f"hoglah-kafka-pub-{result.job_id[:8]}"
         ).start()
 
     def _publish_now(self, job_id: str, correlation_id: str, reply_to: str | None, value: bytes) -> bool:
         """Produce one result message; mark published in the store ONLY on a
-        confirmed broker ack (the outbox flip). On failure, leave it unpublished
-        so startup recovery re-emits it."""
+        confirmed broker ack (the outbox flip). If the produce fails — or the
+        post-ack mark fails — leave it unpublished so startup recovery re-emits
+        it (a re-emit is a Kafka duplicate, de-duped downstream by correlation_id)."""
         assert self._transport is not None
         topic = reply_to or self._config.kafka_results_topic
         try:
@@ -399,27 +458,45 @@ class KafkaBridge:
                 "Kafka result publish failed for job %s (left for restart re-emit)", job_id
             )
             return False
-        self._store.mark_result_published(job_id)
+        try:
+            self._store.mark_result_published(job_id)
+        except Exception:
+            logger.warning(
+                "Published job %s but failed to mark it published (will re-emit on restart)", job_id
+            )
+            return False
         return True
 
-    def republish_unpublished(self) -> int:
+    def republish_unpublished(self, *, batch: int = 500) -> int:
         """Outbox recovery: re-emit terminal results not yet acknowledged by the
-        broker. Returns the number re-emitted."""
+        broker. Drains the full backlog (in batches), not just the first `batch`.
+        Returns the number re-emitted."""
         if not hasattr(self._store, "list_unpublished_terminal"):
             return 0
-        count = 0
-        for row in self._store.list_unpublished_terminal(limit=500):
-            req_meta = (row.get("request") or {}).get("metadata") or {}
-            kafka_meta = req_meta.get("_kafka") or {}
-            correlation_id = kafka_meta.get("correlation_id")
-            if not correlation_id:
-                # Not a Kafka-originated job; mark it so we don't rescan forever.
-                self._store.mark_result_published(row["id"])
-                continue
-            reply_to = kafka_meta.get("reply_to")
-            value = build_result_message(row.get("result") or {}, correlation_id)
-            if self._publish_now(row["id"], correlation_id, reply_to, value):
-                count += 1
-        if count:
-            logger.info("Kafka outbox re-emitted %d unpublished result(s) on startup", count)
-        return count
+        total = 0
+        while True:
+            rows = self._store.list_unpublished_terminal(limit=batch)
+            if not rows:
+                break
+            removed = 0  # rows that left the unpublished set this pass (emitted or marked)
+            for row in rows:
+                req_meta = (row.get("request") or {}).get("metadata") or {}
+                kafka_meta = req_meta.get("_kafka") or {}
+                correlation_id = kafka_meta.get("correlation_id")
+                if not correlation_id:
+                    # Not a Kafka-originated job; mark it so we don't rescan forever.
+                    self._store.mark_result_published(row["id"])
+                    removed += 1
+                    continue
+                reply_to = kafka_meta.get("reply_to")
+                value = build_result_message(row.get("result") or {}, correlation_id)
+                if self._publish_now(row["id"], correlation_id, reply_to, value):
+                    total += 1
+                    removed += 1
+            # No progress (e.g. broker unreachable) → stop instead of spinning;
+            # a short batch means the backlog is drained.
+            if removed == 0 or len(rows) < batch:
+                break
+        if total:
+            logger.info("Kafka outbox re-emitted %d unpublished result(s) on startup", total)
+        return total

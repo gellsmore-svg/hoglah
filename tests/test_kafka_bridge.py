@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from collections import deque
@@ -28,6 +29,11 @@ from hoglah.kafka_bridge import (
 )
 from hoglah.models import JobRequest, JobResult, JobStatus
 from hoglah.store import create_sqlite_store
+
+requires_mongo = pytest.mark.skipif(
+    os.environ.get("RUN_MONGO_TESTS") != "1",
+    reason="Mongo bridge tests require RUN_MONGO_TESTS=1 and a MongoDB at mongodb://localhost:27017.",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -242,6 +248,111 @@ def test_parse_input_maps_fields_and_options():
     assert parsed.request.model == "m"
     assert parsed.request.tags == ["a", "b"]
     assert parsed.request.metadata["_kafka"]["reply_to"] == "r"
+
+
+def test_reply_to_must_be_a_string():
+    from hoglah.kafka_bridge import InvalidMessageError
+
+    with pytest.raises(InvalidMessageError):
+        parse_input_message(json.dumps({"correlation_id": "c", "model": "m", "prompt": "x", "reply_to": 123}).encode())
+
+
+# --------------------------------------------------------------------------- #
+# Regression tests for the hardening findings (v0.5.1)
+# --------------------------------------------------------------------------- #
+
+
+def test_poison_not_committed_when_dlt_write_fails(store):
+    """Critical: a poison message must NOT be committed if the dead-letter write
+    fails — otherwise it is silently lost. It must be retried instead."""
+    bridge, t = _bridge(store)
+    t.fail_publish = True  # DLT produce will fail
+    m = t.add_input(b"{bad json")
+    bridge._handle_message(m)
+    assert t.produced == []  # nothing dead-lettered
+    assert t.committed == []  # and NOT committed → broker will redeliver
+
+    # Broker recovers; redelivery now dead-letters and commits.
+    t.fail_publish = False
+    m2 = t.add_input(b"{bad json")
+    bridge._handle_message(m2)
+    assert t.produced and t.produced[0][0] == "hoglah-jobs-dlt"
+    assert t.committed == [("hoglah-jobs", 0, m2.offset)]
+
+
+def test_egress_crash_after_ack_before_mark_is_reemitted(store):
+    """The (b) crash window: produce is acked but the post-ack mark fails. The
+    result must stay in the outbox and be re-emitted (at-least-once egress)."""
+    bridge, t = _bridge(store)
+    _complete_kafka_job(store, "ackmark", reply_to=None)
+
+    real_mark = store.mark_result_published
+    store.mark_result_published = lambda jid: (_ for _ in ()).throw(RuntimeError("crash after ack"))  # type: ignore[method-assign]
+    assert bridge.republish_unpublished() == 0  # produced, but mark failed → not counted done
+    assert len(t.produced) == 1  # it WAS published once
+    assert store.list_unpublished_terminal()  # still pending in the outbox
+
+    store.mark_result_published = real_mark  # type: ignore[method-assign]
+    assert bridge.republish_unpublished() == 1  # re-emitted (Kafka duplicate, deduped downstream)
+    assert len(t.produced) == 2
+    assert bridge.republish_unpublished() == 0
+
+
+def test_publish_result_live_path_produces_on_thread(store):
+    bridge, t = _bridge(store)
+    req = JobRequest(prompt="hi", model="m", metadata={"_kafka": {"correlation_id": "live", "reply_to": "out"}})
+    result = JobResult(job_id="jlive", status=JobStatus.COMPLETED, output="z", model="m")
+    bridge.publish_result(result, req)  # spawns a daemon egress thread
+
+    deadline = time.time() + 3
+    while not t.produced and time.time() < deadline:
+        time.sleep(0.02)
+    assert t.produced, "live egress thread did not produce"
+    topic, key, value = t.produced[-1]
+    assert topic == "out" and key == "live"
+    assert json.loads(value)["correlation_id"] == "live"
+
+
+def test_concurrent_enqueue_same_correlation_id_yields_one_job(store):
+    """The idempotent-enqueue race: many threads enqueue the same correlation_id
+    at once; exactly one job exists and all callers see the same id."""
+    n = 12
+    barrier = threading.Barrier(n)
+    ids: list[str] = []
+    lock = threading.Lock()
+
+    def worker():
+        barrier.wait()
+        jid = store.enqueue(JobRequest(prompt="x", model="m"), correlation_id="race")
+        with lock:
+            ids.append(jid)
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert len(set(ids)) == 1
+    assert len(store.list()) == 1
+
+
+@requires_mongo
+def test_mongo_bridge_ingress_is_idempotent():
+    from hoglah.mongo_store import create_mongo_store
+
+    store = create_mongo_store("mongodb://localhost:27017", "hoglah_test", "hoglah_kafka_" + uuid.uuid4().hex[:8])
+    transport = FakeKafkaTransport()
+    bridge = KafkaBridge(store=store, config=_config(), transport=transport)
+    try:
+        payload = _input("mdup")
+        bridge._handle_message(transport.add_input(payload))
+        bridge._handle_message(transport.add_input(payload))  # redelivery
+        assert store.get_status_counts().get("queued") == 1
+        assert len(store.list()) == 1
+    finally:
+        store._col.drop()
+        store.close()
 
 
 # --------------------------------------------------------------------------- #
