@@ -407,6 +407,34 @@ def test_info():
     h.close()
 
 
+def test_config_view_reports_backend_and_transport_without_secrets():
+    """The config view (info()/result metadata/`hoglah doctor`) must surface the
+    backend + transport flags for diagnostics, but never the connection URLs,
+    which can embed credentials."""
+    db = _temp_db()
+    h = Hoglah(
+        config={
+            "db_path": db,
+            "redis_enabled": True,
+            "redis_url": "redis://user:secret@example:6379/0",
+        },
+        start_worker=False,
+    )
+    cfg = h.info()["config"]
+    h.close()
+
+    # Diagnostic fields present.
+    assert cfg["backend"] == "sqlite"
+    assert cfg["redis_enabled"] is True
+    assert cfg["kafka_enabled"] is False
+    assert cfg["rabbitmq_enabled"] is False
+
+    # No connection strings leak (the password must not appear anywhere).
+    assert "redis_url" not in cfg
+    assert "mongo_uri" not in cfg
+    assert "secret" not in repr(cfg)
+
+
 def test_clear_jobs():
     """Test clearing jobs by status and age via client (CLI uses it)."""
     db = _temp_db()

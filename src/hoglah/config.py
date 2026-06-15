@@ -153,6 +153,11 @@ class HoglahSettings(BaseSettings):
         description="Consumer name within the group. Stable across restarts so a crashed "
         "consumer's pending (unacked) messages are recovered. Use distinct names per process.",
     )
+    redis_delete_acked: bool = Field(
+        default=True,
+        description="XDEL each input entry after it is acked (keeps the input stream bounded). "
+        "Set False to retain acked entries in the stream for replay/audit (trim externally).",
+    )
 
     # Concurrency control (ADR-003)
     concurrency: int = Field(
@@ -216,13 +221,23 @@ class HoglahSettings(BaseSettings):
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a serializable view (useful for debugging / result metadata)."""
+        """Return a serializable view (useful for debugging / result metadata).
+
+        Deliberately excludes connection strings (mongo_uri, redis_url, Kafka/
+        RabbitMQ URLs) — they may carry credentials and this view flows into
+        result metadata and `hoglah doctor` output. Only the backend name and the
+        transport on/off flags are exposed.
+        """
         return {
             "db_path": str(self.db_path),
+            "backend": self.backend,
             "concurrency": self.concurrency,
             "ollama_host": self.ollama_host,
             "output_dir": str(self.output_dir) if self.output_dir else None,
             "log_level": self.log_level,
+            "kafka_enabled": self.kafka_enabled,
+            "rabbitmq_enabled": self.rabbitmq_enabled,
+            "redis_enabled": self.redis_enabled,
         }
 
 

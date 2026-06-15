@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .kafka_bridge import Message, MessagePublishError
+from .kafka_bridge import Message, MessagePublishError, dead_letter_envelope
 
 
 class RedisStreamsTransport:
@@ -42,6 +42,7 @@ class RedisStreamsTransport:
         dlq_stream: str,
         group: str,
         consumer_name: str,
+        delete_acked: bool = True,
     ):
         try:
             import redis
@@ -56,6 +57,7 @@ class RedisStreamsTransport:
         self._dlq_stream = dlq_stream
         self._group = group
         self._consumer = consumer_name
+        self._delete_acked = delete_acked
         self._recovered = False  # have we drained our PEL since startup?
 
         self._r = redis.Redis.from_url(url)  # bytes responses (decode_responses=False)
@@ -105,21 +107,24 @@ class RedisStreamsTransport:
 
     def ack(self, message: Message) -> None:
         self._r.xack(self._input_stream, self._group, message.raw)
-        try:  # keep the input stream bounded; best-effort
-            self._r.xdel(self._input_stream, message.raw)
-        except Exception:
-            pass
+        if self._delete_acked:
+            try:  # keep the input stream bounded; best-effort
+                self._r.xdel(self._input_stream, message.raw)
+            except Exception:
+                pass
 
     def nack(self, message: Message, reason: str) -> None:
         # No broker-side dead-letter in Redis Streams: XADD to the DLQ stream,
         # then XACK. If the XADD raises we do NOT ack → the entry stays in the
-        # PEL → recovered on the next startup.
-        self._r.xadd(self._dlq_stream, {"reason": reason, "data": message.value})
+        # PEL → recovered on the next startup. The envelope (reason + source +
+        # raw body) matches the Kafka adapter's dead-letter shape.
+        self._r.xadd(self._dlq_stream, {"data": dead_letter_envelope(message, reason)})
         self._r.xack(self._input_stream, self._group, message.raw)
-        try:
-            self._r.xdel(self._input_stream, message.raw)
-        except Exception:
-            pass
+        if self._delete_acked:
+            try:
+                self._r.xdel(self._input_stream, message.raw)
+            except Exception:
+                pass
 
     def produce_and_flush(self, dest: str, key: str | None, value: bytes, timeout: float = 10.0) -> None:
         try:
@@ -143,4 +148,5 @@ def create_redis_streams_transport(config: Any) -> RedisStreamsTransport:
         dlq_stream=config.redis_dlq_stream,
         group=config.redis_group,
         consumer_name=config.redis_consumer_name,
+        delete_acked=config.redis_delete_acked,
     )

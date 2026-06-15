@@ -1,0 +1,96 @@
+name: Bug report
+description: Report something in Hoglah that isn't working as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. The fastest way to a fix is a
+        small, self-contained reproduction plus the diagnostics below.
+
+        **Please do not paste secrets.** `hoglah doctor` is designed not to print
+        connection URLs, but double-check any logs you attach for credentials in
+        `redis://`, `mongodb://`, or broker URLs before posting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        I submitted an embedding job with backend="mongo" and ...
+        I expected ... but instead ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps or a short code/CLI snippet that triggers the bug.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`hoglah doctor` output"
+      description: >-
+        Run `hoglah doctor` (add `--real` if you use a real Ollama host) and paste
+        the output. This reports version, adapter, backend, and active transport —
+        and does not print connection URLs.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Hoglah version
+      description: Output of `hoglah --version`.
+      placeholder: "0.7.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install-source
+    attributes:
+      label: Installed from
+      options:
+        - PyPI (pip install hoglah)
+        - Source / editable checkout
+        - Other (describe above)
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Storage backend
+      options:
+        - sqlite (default)
+        - mongo
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Messaging transport
+      description: Which bridge, if any (see the "Transport" line from `hoglah doctor`).
+      options:
+        - none (library / CLI)
+        - kafka
+        - rabbitmq
+        - redis
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python & OS
+      description: e.g. "Python 3.11 on Ubuntu 22.04 (WSL2)".
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / traceback
+      description: Any error output. Scrub credentials first.
+      render: shell
+    validations:
+      required: false

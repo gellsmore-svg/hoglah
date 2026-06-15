@@ -175,3 +175,45 @@ def test_real_redis_pel_recovery():
     finally:
         r.delete(in_s, out_s, dlq)
         r.close()
+
+
+@requires_redis
+def test_real_redis_delete_acked_toggle():
+    """delete_acked=True (default) XDELs the input entry after ack; =False keeps
+    it in the stream (for replay/audit)."""
+    import redis
+
+    from hoglah.redis_streams import RedisStreamsTransport
+
+    run = uuid.uuid4().hex[:8]
+    in_s, out_s, dlq, group = _streams(run)
+    body = {"data": json.dumps({"correlation_id": "x", "model": "m", "prompt": "hi"}).encode()}
+
+    r = redis.Redis.from_url(REDIS_URL)
+    try:
+        # Default (delete_acked=True): the entry is gone after ack.
+        t_del = RedisStreamsTransport(
+            url=REDIS_URL, input_stream=in_s, results_stream=out_s, dlq_stream=dlq,
+            group=group, consumer_name="c-del",
+        )
+        r.xadd(in_s, body)
+        m = t_del.poll(2.0)
+        assert m is not None
+        t_del.ack(m)
+        assert r.xlen(in_s) == 0, "delete_acked=True should XDEL the acked entry"
+        t_del.close()
+
+        # delete_acked=False: the entry stays in the stream after ack.
+        t_keep = RedisStreamsTransport(
+            url=REDIS_URL, input_stream=in_s, results_stream=out_s, dlq_stream=dlq,
+            group=group, consumer_name="c-keep", delete_acked=False,
+        )
+        r.xadd(in_s, body)
+        m = t_keep.poll(2.0)
+        assert m is not None
+        t_keep.ack(m)
+        assert r.xlen(in_s) == 1, "delete_acked=False should retain the acked entry"
+        t_keep.close()
+    finally:
+        r.delete(in_s, out_s, dlq)
+        r.close()

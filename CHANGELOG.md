@@ -33,6 +33,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   + poison→DLQ + PEL-recovery test (green against Redis 7). Enable at most one of
   `kafka_enabled` / `rabbitmq_enabled` / `redis_enabled` per instance (precedence
   kafka > rabbitmq > redis; the client warns if several are set).
+  - `redis_delete_acked` config (default `True`) toggles the post-ack `XDEL`: set
+    `False` to retain acked entries in the input stream for replay/audit (trim
+    externally). The dead-letter `XADD` now wraps poison messages in the shared
+    `dead_letter_envelope` (reason + source + raw body), matching the Kafka
+    adapter's DLQ shape. Both covered by a gated real-server test.
+- **`hoglah doctor` now reports the active backend and messaging transport**
+  (`Backend: sqlite|mongo`, `Transport: none|kafka|rabbitmq|redis`), so bug
+  reports against the bridges are actionable. The config view used by `doctor`,
+  `Hoglah.info()`, and result metadata gained `backend` + the three
+  `*_enabled` flags but still **excludes connection strings** (`mongo_uri`,
+  `redis_url`, broker URLs) so credentials never appear in diagnostics.
+- **Bug-reporting path for users**: a GitHub **Bug report** issue-form template
+  (prompts for `hoglah doctor` output, version, backend, transport, repro), a
+  `SECURITY.md` with a private vulnerability-reporting channel, and a "Reporting
+  bugs & support" section in the README.
 
 ## [0.6.0] - 2026-06-15
 

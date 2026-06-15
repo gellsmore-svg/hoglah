@@ -300,10 +300,19 @@ def doctor(
     try:
         h = Hoglah(config=cfg, use_real=use_real, start_worker=False)
         i = h.info()
+        ic = i["config"]
         print(f"Adapter: {i['adapter']}")
-        print(f"DB: {i['config']['db_path']}")
-        print(f"Log level: {i['config'].get('log_level', 'INFO')}")
-        print(f"Concurrency: {i['config']['concurrency']}")
+        print(f"Backend: {ic.get('backend', 'sqlite')}")
+        # Active messaging transport, same precedence as the client (kafka >
+        # rabbitmq > redis). 'none' = library/CLI mode, no bridge.
+        transport = next(
+            (n for n in ("kafka", "rabbitmq", "redis") if ic.get(f"{n}_enabled")),
+            "none",
+        )
+        print(f"Transport: {transport}")
+        print(f"DB: {ic['db_path']}")
+        print(f"Log level: {ic.get('log_level', 'INFO')}")
+        print(f"Concurrency: {ic['concurrency']}")
         print("Instance created OK.")
     except Exception as e:
         typer.secho(f"Failed to create Hoglah: {e}", fg=typer.colors.RED)

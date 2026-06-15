@@ -436,6 +436,23 @@ See sister domains for style and quality references:
 
 Full details will evolve in `docs/architecture-decisions.md` and implementation docs.
 
+## Reporting bugs & support
+
+Found a bug or have a question? Open an issue at
+[github.com/gellsmore-svg/hoglah/issues](https://github.com/gellsmore-svg/hoglah/issues)
+(the **Bug report** template will prompt you for what's needed).
+
+To make a report actionable, please include:
+
+- the output of **`hoglah doctor`** (`--real` if you use a real Ollama host) — it
+  reports the version, adapter, **backend**, and active **transport**, and is safe
+  to paste (it never prints connection URLs/credentials);
+- your Hoglah version (`hoglah --version`), Python version, and OS;
+- a minimal reproduction (a short snippet or CLI commands).
+
+**Security issues:** please report privately — see [SECURITY.md](SECURITY.md) —
+rather than opening a public issue.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
