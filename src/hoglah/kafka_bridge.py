@@ -1,28 +1,30 @@
-"""Kafka bridge — a transport adapter, NOT a storage backend (ADR-018).
+"""Messaging bridge — a transport adapter, NOT a storage backend (ADR-018).
 
 When enabled, Hoglah:
-  - **consumes** job-request messages from an input topic, enqueues them into
+  - **consumes** job-request messages from an input source, enqueues them into
     the existing JobStore (SQLite/Mongo), and lets the normal serial worker
     process them; and
-  - **produces** a result message back to Kafka on terminal status.
+  - **produces** a result message back on terminal status.
 
 Crash safety is built in, not best-effort (see docs/kafka-bridge-design.md §6):
 
-  - **Ingress** uses the *idempotent consumer* pattern: the offset is committed
-    only AFTER the job is durably enqueued, and enqueue is idempotent on the
-    message's `correlation_id`. So a redelivery after a crash in the
-    enqueue→commit window re-enqueues harmlessly (a no-op) — never lost, never
-    duplicated.
-  - **Egress** uses a *transactional outbox*: a result is marked published in
-    the store only AFTER the broker acks it. On startup, terminal jobs that
-    were computed but not yet published are re-emitted (`republish_unpublished`).
-    With an idempotent producer + consumer-side correlation_id de-dup this gives
-    exactly-once *effect* end to end.
+  - **Ingress** uses the *idempotent consumer* pattern: the message is acked only
+    AFTER the job is durably enqueued, and enqueue is idempotent on the message's
+    `correlation_id`. So a redelivery after a crash in the enqueue→ack window
+    re-enqueues harmlessly (a no-op) — never lost, never duplicated.
+  - **Egress** uses a *transactional outbox*: a result is marked published in the
+    store only AFTER the broker acks it. On startup, terminal jobs that were
+    computed but not yet published are re-emitted (`republish_unpublished`),
+    giving exactly-once *effect* (with consumer-side correlation_id de-dup).
+  - **Poison** messages are dead-lettered via the transport's `nack`, never lost.
 
-`confluent-kafka` is an optional dependency (`pip install "hoglah[kafka]"`),
-imported lazily so non-Kafka users never need it. The broker is abstracted
-behind the `KafkaTransport` protocol so the crash scenarios are unit-testable
-with a deterministic in-memory fake (no broker required).
+The broker is abstracted behind the `MessageTransport` protocol (poll / ack /
+nack / produce_and_flush / close), so the crash scenarios are unit-testable with
+a deterministic in-memory fake (no broker required), and additional brokers
+(RabbitMQ, …) plug in as new adapters. The first adapter is Kafka
+(`ConfluentKafkaTransport`), behind the optional `confluent-kafka` dependency
+(`pip install "hoglah[kafka]"`), imported lazily. The names `KafkaTransport` /
+`KafkaBridge` / `KafkaMessage` remain as back-compat aliases (ADR-018).
 """
 
 from __future__ import annotations
@@ -49,19 +51,19 @@ class InvalidMessageError(ValueError):
     """A consumed message cannot be turned into a job (poison → dead-letter)."""
 
 
-class KafkaPublishError(RuntimeError):
-    """A result message was not acknowledged by the broker."""
+class MessagePublishError(RuntimeError):
+    """A message was not acknowledged by the broker."""
 
 
 @dataclass
-class KafkaMessage:
-    topic: str
-    partition: int
-    offset: int
+class Message:
+    source: str  # topic / queue the message came from (informational)
+    partition: int  # Kafka partition; -1 for brokers without partitions
+    offset: int  # Kafka offset; -1 for brokers without offsets
     key: str | None
     value: bytes
     error: str | None = None
-    raw: Any = None  # underlying client message, used for offset commit
+    raw: Any = None  # underlying client message, used for ack / nack
 
 
 @dataclass
@@ -79,9 +81,22 @@ def _safe_text(value: bytes | None) -> str:
     return str(value)
 
 
+def dead_letter_envelope(msg: Message, reason: str) -> bytes:
+    """The JSON we wrap a poison message in when dead-lettering it."""
+    return json.dumps(
+        {
+            "reason": reason,
+            "source": msg.source,
+            "partition": msg.partition,
+            "offset": msg.offset,
+            "raw": _safe_text(msg.value),
+        }
+    ).encode("utf-8")
+
+
 def parse_input_message(value: bytes) -> ParsedInput:
     """Deserialize + validate an input message into a JobRequest. Raises
-    InvalidMessageError for anything un-processable (→ dead-letter topic)."""
+    InvalidMessageError for anything un-processable (→ dead-letter)."""
     try:
         data = json.loads(value)
     except Exception as exc:  # noqa: BLE001 - any decode failure is poison
@@ -104,7 +119,7 @@ def parse_input_message(value: bytes) -> ParsedInput:
 
     reply_to = data.get("reply_to")
     if reply_to is not None and not isinstance(reply_to, str):
-        raise InvalidMessageError("'reply_to' must be a string topic name")
+        raise InvalidMessageError("'reply_to' must be a string topic/queue name")
     user_meta = data.get("metadata") or {}
     if not isinstance(user_meta, dict):
         raise InvalidMessageError("'metadata' must be an object")
@@ -124,8 +139,9 @@ def parse_input_message(value: bytes) -> ParsedInput:
             messages=messages,
             model=model,
             tags=data.get("tags") or [],
-            # Stash the Kafka routing info so egress (live or restart-replay) can
-            # address the reply and echo the correlation_id.
+            # Stash the messaging routing info so egress (live or restart-replay)
+            # can address the reply and echo the correlation_id. The key is
+            # "_kafka" for backward compatibility with jobs enqueued by v0.5.x.
             metadata={**user_meta, "_kafka": {"correlation_id": correlation_id, "reply_to": reply_to}},
             **extra,
         )
@@ -164,22 +180,31 @@ def build_result_message(result_dict: dict[str, Any], correlation_id: str) -> by
 # --------------------------------------------------------------------------- #
 
 
-class KafkaTransport(Protocol):
-    def poll(self, timeout: float) -> KafkaMessage | None: ...
-    def commit(self, message: KafkaMessage) -> None: ...
-    def produce_and_flush(self, topic: str, key: str | None, value: bytes, timeout: float = 10.0) -> None: ...
+class MessageTransport(Protocol):
+    """A broker adapter. `ack`/`nack` are per-message: ack = "handled, don't
+    redeliver"; nack = "dead-letter this poison message". Both must be durable —
+    raise if the broker did not confirm, so the bridge leaves the message for
+    redelivery rather than losing it."""
+
+    def poll(self, timeout: float) -> Message | None: ...
+    def ack(self, message: Message) -> None: ...
+    def nack(self, message: Message, reason: str) -> None: ...
+    def produce_and_flush(self, dest: str, key: str | None, value: bytes, timeout: float = 10.0) -> None: ...
     def close(self) -> None: ...
 
 
 class ConfluentKafkaTransport:
-    """Real transport over `confluent-kafka` (librdkafka).
+    """Kafka adapter over `confluent-kafka` (librdkafka).
 
     Consumer: manual offset commit (`enable.auto.commit=False`) so we only ever
-    commit after a durable enqueue. Producer: idempotent + `acks=all` so the
+    ack (commit) after a durable enqueue. Producer: idempotent + `acks=all` so the
     broker de-dups producer retries and a result isn't lost on a transient hiccup.
+    Kafka has no native dead-letter, so `nack` produces the poison message to a
+    dead-letter topic and then commits the offset (and only commits if that
+    produce was acked — otherwise it raises and the offset stays uncommitted).
     """
 
-    def __init__(self, *, bootstrap_servers: str, group_id: str, input_topic: str):
+    def __init__(self, *, bootstrap_servers: str, group_id: str, input_topic: str, dlt_topic: str):
         try:
             from confluent_kafka import Consumer, Producer
         except ImportError as exc:  # pragma: no cover - import guard
@@ -187,6 +212,7 @@ class ConfluentKafkaTransport:
                 "The Kafka bridge requires confluent-kafka. Install with: pip install 'hoglah[kafka]'"
             ) from exc
 
+        self._dlt_topic = dlt_topic
         self._consumer = Consumer(
             {
                 "bootstrap.servers": bootstrap_servers,
@@ -204,13 +230,13 @@ class ConfluentKafkaTransport:
             }
         )
 
-    def poll(self, timeout: float) -> KafkaMessage | None:
+    def poll(self, timeout: float) -> Message | None:
         msg = self._consumer.poll(timeout)
         if msg is None:
             return None
         if msg.error():
-            return KafkaMessage(
-                topic=msg.topic() or "",
+            return Message(
+                source=msg.topic() or "",
                 partition=msg.partition() if msg.partition() is not None else -1,
                 offset=msg.offset() if msg.offset() is not None else -1,
                 key=None,
@@ -219,8 +245,8 @@ class ConfluentKafkaTransport:
                 raw=msg,
             )
         key = msg.key()
-        return KafkaMessage(
-            topic=msg.topic(),
+        return Message(
+            source=msg.topic(),
             partition=msg.partition(),
             offset=msg.offset(),
             key=key.decode("utf-8", "replace") if isinstance(key, bytes) else key,
@@ -228,22 +254,28 @@ class ConfluentKafkaTransport:
             raw=msg,
         )
 
-    def commit(self, message: KafkaMessage) -> None:
+    def ack(self, message: Message) -> None:
         self._consumer.commit(message=message.raw, asynchronous=False)
 
-    def produce_and_flush(self, topic: str, key: str | None, value: bytes, timeout: float = 10.0) -> None:
+    def nack(self, message: Message, reason: str) -> None:
+        # Dead-letter then commit. produce_and_flush raises if the DLT write was
+        # not acked — in which case we do NOT commit, so the message is retried.
+        self.produce_and_flush(self._dlt_topic, message.key, dead_letter_envelope(message, reason))
+        self._consumer.commit(message=message.raw, asynchronous=False)
+
+    def produce_and_flush(self, dest: str, key: str | None, value: bytes, timeout: float = 10.0) -> None:
         errors: list[Any] = []
 
         def _on_delivery(err: Any, _msg: Any) -> None:
             if err is not None:
                 errors.append(err)
 
-        self._producer.produce(topic, key=key, value=value, on_delivery=_on_delivery)
+        self._producer.produce(dest, key=key, value=value, on_delivery=_on_delivery)
         remaining = self._producer.flush(timeout)
         if remaining and remaining > 0:
-            raise KafkaPublishError(f"{remaining} message(s) not acknowledged within {timeout}s")
+            raise MessagePublishError(f"{remaining} message(s) not acknowledged within {timeout}s")
         if errors:
-            raise KafkaPublishError(str(errors[0]))
+            raise MessagePublishError(str(errors[0]))
 
     def close(self) -> None:
         try:
@@ -253,15 +285,16 @@ class ConfluentKafkaTransport:
 
 
 # --------------------------------------------------------------------------- #
-# Bridge orchestration
+# Bridge orchestration (broker-neutral)
 # --------------------------------------------------------------------------- #
 
 
-class KafkaBridge:
-    """Wires a KafkaTransport to a JobStore. Owns the consumer thread and the
-    egress (result-producing) path."""
+class MessageBridge:
+    """Wires a MessageTransport to a JobStore. Owns the consumer thread and the
+    egress (result-producing) path. Broker-neutral: all broker specifics live in
+    the transport."""
 
-    def __init__(self, *, store: Any, config: Any, transport: KafkaTransport | None = None):
+    def __init__(self, *, store: Any, config: Any, transport: MessageTransport | None = None):
         self._store = store
         self._config = config
         self._transport = transport
@@ -274,12 +307,15 @@ class KafkaBridge:
 
     # -- lifecycle --------------------------------------------------------- #
 
-    def _ensure_transport(self) -> KafkaTransport:
+    def _ensure_transport(self) -> MessageTransport:
+        # Phase 1: Kafka is the only built-in adapter, so the bridge defaults to
+        # it from the kafka_* config. A future transport selector branches here.
         if self._transport is None:
             self._transport = ConfluentKafkaTransport(
                 bootstrap_servers=self._config.kafka_bootstrap_servers,
                 group_id=self._config.kafka_group_id,
                 input_topic=self._config.kafka_input_topic,
+                dlt_topic=self._config.kafka_dlt_topic,
             )
         return self._transport
 
@@ -293,7 +329,7 @@ class KafkaBridge:
         try:
             self.republish_unpublished()
         except Exception:
-            logger.exception("Kafka outbox re-publish failed at startup")
+            logger.exception("Messaging outbox re-publish failed at startup")
 
     def start(self, *, skip_republish: bool = False) -> None:
         self._ensure_transport()
@@ -303,14 +339,14 @@ class KafkaBridge:
             try:
                 self.republish_unpublished()
             except Exception:
-                logger.exception("Kafka outbox re-publish failed at startup")
+                logger.exception("Messaging outbox re-publish failed at startup")
         self._running = True
         self._thread = threading.Thread(
-            target=self._consume_loop, daemon=True, name="hoglah-kafka-consumer"
+            target=self._consume_loop, daemon=True, name="hoglah-msg-consumer"
         )
         self._thread.start()
         logger.info(
-            "Kafka bridge started (in='%s' results='%s' group='%s')",
+            "Messaging bridge started (in='%s' results='%s' group='%s')",
             self._config.kafka_input_topic,
             self._config.kafka_results_topic,
             self._config.kafka_group_id,
@@ -333,7 +369,7 @@ class KafkaBridge:
             try:
                 self._transport.close()
             except Exception:
-                logger.exception("Error closing Kafka transport")
+                logger.exception("Error closing messaging transport")
 
     # -- ingress ----------------------------------------------------------- #
 
@@ -343,85 +379,71 @@ class KafkaBridge:
             try:
                 msg = self._transport.poll(1.0)
             except Exception:
-                logger.exception("Kafka poll failed; backing off")
+                logger.exception("Messaging poll failed; backing off")
                 time.sleep(1.0)
                 continue
             if msg is None:
                 continue
             if msg.error is not None:
-                logger.warning("Kafka consume error: %s", msg.error)
+                logger.warning("Messaging consume error: %s", msg.error)
                 continue
             try:
                 self._handle_message(msg)
             except Exception:
                 # A store/transport failure mid-handle must not kill the consumer
                 # thread (which would silently stop all consumption). Leave the
-                # offset uncommitted so the message is retried, back off, continue.
+                # message un-acked so it is retried, back off, continue.
                 logger.exception(
-                    "Failed handling Kafka message at %s[%d]@%d; not committing (will retry)",
-                    msg.topic, msg.partition, msg.offset,
+                    "Failed handling message from %s[%d]@%d; not acking (will retry)",
+                    msg.source, msg.partition, msg.offset,
                 )
                 time.sleep(0.5)
 
-    def _handle_message(self, msg: KafkaMessage) -> None:
+    def _handle_message(self, msg: Message) -> None:
         """Process exactly one input message. Order is load-bearing for crash
-        safety: durable idempotent enqueue FIRST, commit the offset only after."""
+        safety: durable idempotent enqueue FIRST, ack only after."""
         try:
             parsed = parse_input_message(msg.value)
         except InvalidMessageError as exc:
             logger.warning(
-                "Poison message at %s[%d]@%d → dead-letter: %s",
-                msg.topic, msg.partition, msg.offset, exc,
+                "Poison message from %s[%d]@%d → dead-letter: %s",
+                msg.source, msg.partition, msg.offset, exc,
             )
-            # Commit ONLY if the message was durably dead-lettered. If the DLT
-            # produce fails (e.g. broker down), leave the offset uncommitted so
-            # it is retried — committing past an un-dead-lettered message would
-            # lose it silently. This stalls the partition only while the DLT
-            # topic is unwritable, which is a broker-outage condition (the
-            # consumer can't make progress then anyway), not the poison itself.
-            if self._to_dead_letter(msg, str(exc)):
-                self._safe_commit(msg)
+            # nack dead-letters the message. If the transport cannot durably
+            # dead-letter it (raises), we do NOT ack — leaving it for redelivery
+            # rather than losing it. (For Kafka, nack = produce-to-DLT + commit.)
+            self._safe_nack(msg, str(exc))
             return
-        # Durable, idempotent enqueue. A crash here (before commit) means the
-        # message is redelivered and re-enqueued as a no-op — never duplicated.
+        # Durable, idempotent enqueue. A crash here (before ack) means the message
+        # is redelivered and re-enqueued as a no-op — never duplicated.
         self._store.enqueue(parsed.request, correlation_id=parsed.correlation_id)
-        self._safe_commit(msg)
+        self._safe_ack(msg)
 
-    def _to_dead_letter(self, msg: KafkaMessage, reason: str) -> bool:
-        """Produce a poison message to the dead-letter topic. Returns True only
-        on a confirmed broker ack (so the caller knows it is safe to commit)."""
-        assert self._transport is not None
-        payload = json.dumps(
-            {
-                "reason": reason,
-                "topic": msg.topic,
-                "partition": msg.partition,
-                "offset": msg.offset,
-                "raw": _safe_text(msg.value),
-            }
-        ).encode("utf-8")
-        try:
-            self._transport.produce_and_flush(self._config.kafka_dlt_topic, msg.key, payload)
-            return True
-        except Exception:
-            logger.exception("Failed to write poison message to dead-letter topic; will retry")
-            return False
-
-    def _safe_commit(self, msg: KafkaMessage) -> None:
+    def _safe_ack(self, msg: Message) -> None:
         assert self._transport is not None
         try:
-            self._transport.commit(msg)
+            self._transport.ack(msg)
         except Exception:
-            logger.exception("Kafka offset commit failed at %s[%d]@%d", msg.topic, msg.partition, msg.offset)
+            logger.exception("Message ack failed at %s[%d]@%d", msg.source, msg.partition, msg.offset)
+
+    def _safe_nack(self, msg: Message, reason: str) -> None:
+        assert self._transport is not None
+        try:
+            self._transport.nack(msg, reason)
+        except Exception:
+            logger.exception(
+                "Dead-letter failed at %s[%d]@%d; not acking (will retry)",
+                msg.source, msg.partition, msg.offset,
+            )
 
     # -- egress ------------------------------------------------------------ #
 
     def publish_result(self, result: JobResult, request: JobRequest | None = None) -> None:
         """Live egress hook (called from Hoglah._deliver on terminal status).
 
-        Only publishes jobs that originated from Kafka (carry a `_kafka`
-        correlation_id). Runs on a daemon thread so a slow broker never blocks
-        the worker loop — mirroring the ADR-015 HTTP-callback pattern."""
+        Only publishes jobs that originated from the bridge (carry a `_kafka`
+        correlation_id). Runs on a daemon thread so a slow broker never blocks the
+        worker loop — mirroring the ADR-015 HTTP-callback pattern."""
         meta = (request.metadata if request is not None else None) or {}
         kafka_meta = meta.get("_kafka") if isinstance(meta, dict) else None
         if not kafka_meta or not kafka_meta.get("correlation_id"):
@@ -441,21 +463,21 @@ class KafkaBridge:
                     self._egress_inflight -= 1
 
         threading.Thread(
-            target=_run, daemon=True, name=f"hoglah-kafka-pub-{result.job_id[:8]}"
+            target=_run, daemon=True, name=f"hoglah-msg-pub-{result.job_id[:8]}"
         ).start()
 
     def _publish_now(self, job_id: str, correlation_id: str, reply_to: str | None, value: bytes) -> bool:
         """Produce one result message; mark published in the store ONLY on a
         confirmed broker ack (the outbox flip). If the produce fails — or the
         post-ack mark fails — leave it unpublished so startup recovery re-emits
-        it (a re-emit is a Kafka duplicate, de-duped downstream by correlation_id)."""
+        it (a re-emit is a duplicate, de-duped downstream by correlation_id)."""
         assert self._transport is not None
-        topic = reply_to or self._config.kafka_results_topic
+        dest = reply_to or self._config.kafka_results_topic
         try:
-            self._transport.produce_and_flush(topic, correlation_id, value)
+            self._transport.produce_and_flush(dest, correlation_id, value)
         except Exception:
             logger.warning(
-                "Kafka result publish failed for job %s (left for restart re-emit)", job_id
+                "Result publish failed for job %s (left for restart re-emit)", job_id
             )
             return False
         try:
@@ -484,7 +506,7 @@ class KafkaBridge:
                 kafka_meta = req_meta.get("_kafka") or {}
                 correlation_id = kafka_meta.get("correlation_id")
                 if not correlation_id:
-                    # Not a Kafka-originated job; mark it so we don't rescan forever.
+                    # Not a bridge-originated job; mark it so we don't rescan forever.
                     self._store.mark_result_published(row["id"])
                     removed += 1
                     continue
@@ -498,5 +520,15 @@ class KafkaBridge:
             if removed == 0 or len(rows) < batch:
                 break
         if total:
-            logger.info("Kafka outbox re-emitted %d unpublished result(s) on startup", total)
+            logger.info("Messaging outbox re-emitted %d unpublished result(s) on startup", total)
         return total
+
+
+# --------------------------------------------------------------------------- #
+# Back-compat aliases — Kafka was the first transport (ADR-018). External code
+# and the v0.5.x test/CLI surface refer to the Kafka* names.
+# --------------------------------------------------------------------------- #
+KafkaMessage = Message
+KafkaTransport = MessageTransport
+KafkaBridge = MessageBridge
+KafkaPublishError = MessagePublishError

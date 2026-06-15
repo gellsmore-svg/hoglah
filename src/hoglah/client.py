@@ -193,9 +193,9 @@ class Hoglah:
         # pre-existing terminal job cannot be published twice — once by the
         # outbox replay, once by the worker's live _deliver.
         if start_worker and getattr(self.config, "kafka_enabled", False):
-            from .kafka_bridge import KafkaBridge
+            from .kafka_bridge import MessageBridge
 
-            self._kafka_bridge = KafkaBridge(store=self._store, config=self.config)
+            self._kafka_bridge = MessageBridge(store=self._store, config=self.config)
             self._kafka_bridge.prime()
 
         if start_worker:

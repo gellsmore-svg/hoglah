@@ -42,36 +42,47 @@ requires_mongo = pytest.mark.skipif(
 
 
 class FakeKafkaTransport:
-    """Deterministic in-memory transport. Lets tests inject input messages,
-    inspect produced messages + committed offsets, and simulate broker failures
-    and crashes."""
+    """Deterministic in-memory MessageTransport. Lets tests inject input
+    messages, inspect produced (egress) messages, dead-lettered (poison)
+    messages, and acked offsets, and simulate broker failures and crashes.
+
+    `nack` models a generic transport: a successful dead-letter both records the
+    message and acks it (the message won't be redelivered); a broker failure
+    raises so the bridge leaves it un-acked for retry."""
 
     def __init__(self) -> None:
         self._inbox: deque[KafkaMessage] = deque()
-        self.produced: list[tuple[str, str | None, bytes]] = []
-        self.committed: list[tuple[str, int, int]] = []
+        self.produced: list[tuple[str, str | None, bytes]] = []  # egress results
+        self.dead_lettered: list[tuple[KafkaMessage, str]] = []  # poison
+        self.acked: list[tuple[str, int, int]] = []
         self.fail_publish = False
         self._next_offset = 0
 
     def add_input(self, value: bytes, *, key: str | None = None, topic: str = "hoglah-jobs") -> KafkaMessage:
         msg = KafkaMessage(
-            topic=topic, partition=0, offset=self._next_offset, key=key, value=value, raw=("raw", self._next_offset)
+            source=topic, partition=0, offset=self._next_offset, key=key, value=value, raw=("raw", self._next_offset)
         )
         self._next_offset += 1
         self._inbox.append(msg)
         return msg
 
-    # KafkaTransport protocol
+    # MessageTransport protocol
     def poll(self, timeout: float) -> KafkaMessage | None:
         return self._inbox.popleft() if self._inbox else None
 
-    def commit(self, message: KafkaMessage) -> None:
-        self.committed.append((message.topic, message.partition, message.offset))
+    def ack(self, message: KafkaMessage) -> None:
+        self.acked.append((message.source, message.partition, message.offset))
 
-    def produce_and_flush(self, topic: str, key: str | None, value: bytes, timeout: float = 10.0) -> None:
+    def nack(self, message: KafkaMessage, reason: str) -> None:
         if self.fail_publish:
             raise KafkaPublishError("simulated broker failure")
-        self.produced.append((topic, key, value))
+        self.dead_lettered.append((message, reason))
+        self.acked.append((message.source, message.partition, message.offset))
+
+    def produce_and_flush(self, dest: str, key: str | None, value: bytes, timeout: float = 10.0) -> None:
+        if self.fail_publish:
+            raise KafkaPublishError("simulated broker failure")
+        self.produced.append((dest, key, value))
 
     def close(self) -> None:
         pass
@@ -109,7 +120,7 @@ def _input(correlation_id: str, **extra) -> bytes:
 # --------------------------------------------------------------------------- #
 
 
-def test_ingress_enqueues_then_commits(store):
+def test_ingress_enqueues_then_acks(store):
     bridge, t = _bridge(store)
     msg = t.add_input(_input("c1"))
     bridge._handle_message(msg)
@@ -119,8 +130,8 @@ def test_ingress_enqueues_then_commits(store):
     assert len(jobs) == 1
     # correlation_id + reply routing stashed in request metadata
     assert jobs[0]["request"]["metadata"]["_kafka"]["correlation_id"] == "c1"
-    # offset committed exactly once, AFTER the enqueue
-    assert t.committed == [("hoglah-jobs", 0, msg.offset)]
+    # acked exactly once, AFTER the enqueue
+    assert t.acked == [("hoglah-jobs", 0, msg.offset)]
 
 
 def test_ingress_idempotent_on_duplicate(store):
@@ -131,40 +142,41 @@ def test_ingress_idempotent_on_duplicate(store):
     assert len(store.list()) == 1
 
 
-def test_crash_between_enqueue_and_commit_is_safe(store):
+def test_crash_between_enqueue_and_ack_is_safe(store):
     """The load-bearing crash scenario: enqueue succeeds, the process dies before
-    committing the offset, the broker redelivers. Result: exactly one job."""
+    acking, the broker redelivers. Result: exactly one job."""
     bridge, t = _bridge(store)
     payload = _input("x")
 
-    # First delivery: enqueue, then "crash" before commit (commit raises; the
-    # bridge logs and swallows — the offset is NOT recorded as committed).
+    # First delivery: enqueue, then "crash" before ack (ack raises; the bridge
+    # logs and swallows — the message is NOT recorded as acked).
     m1 = t.add_input(payload)
-    real_commit = t.commit
-    t.commit = lambda msg: (_ for _ in ()).throw(RuntimeError("crash before commit"))  # type: ignore[assignment]
+    real_ack = t.ack
+    t.ack = lambda msg: (_ for _ in ()).throw(RuntimeError("crash before ack"))  # type: ignore[assignment]
     bridge._handle_message(m1)
-    t.commit = real_commit  # type: ignore[assignment]
-    assert t.committed == []  # offset never committed → broker will redeliver
+    t.ack = real_ack  # type: ignore[assignment]
+    assert t.acked == []  # never acked → broker will redeliver
 
-    # Redelivery after restart: idempotent enqueue is a no-op; commit now lands.
+    # Redelivery after restart: idempotent enqueue is a no-op; ack now lands.
     m2 = t.add_input(payload)
     bridge._handle_message(m2)
     assert len(store.list()) == 1
-    assert t.committed == [("hoglah-jobs", 0, m2.offset)]
+    assert t.acked == [("hoglah-jobs", 0, m2.offset)]
 
 
 @pytest.mark.parametrize(
     "bad",
     [b"{not valid json", json.dumps({"model": "m", "prompt": "x"}).encode(), json.dumps({"correlation_id": "c"}).encode()],
 )
-def test_poison_message_goes_to_dlt_and_commits(store, bad):
+def test_poison_message_is_dead_lettered_and_acked(store, bad):
     bridge, t = _bridge(store)
     msg = t.add_input(bad)
     bridge._handle_message(msg)
 
     assert store.get_status_counts() == {}  # no job created
-    assert t.produced and t.produced[0][0] == "hoglah-jobs-dlt"  # parked in DLT
-    assert t.committed == [("hoglah-jobs", 0, msg.offset)]  # committed past the poison
+    assert len(t.dead_lettered) == 1  # parked in the dead-letter
+    assert t.produced == []  # no egress
+    assert t.acked == [("hoglah-jobs", 0, msg.offset)]  # acked past the poison
 
 
 # --------------------------------------------------------------------------- #
@@ -266,18 +278,18 @@ def test_poison_not_committed_when_dlt_write_fails(store):
     """Critical: a poison message must NOT be committed if the dead-letter write
     fails — otherwise it is silently lost. It must be retried instead."""
     bridge, t = _bridge(store)
-    t.fail_publish = True  # DLT produce will fail
+    t.fail_publish = True  # dead-letter write will fail
     m = t.add_input(b"{bad json")
     bridge._handle_message(m)
-    assert t.produced == []  # nothing dead-lettered
-    assert t.committed == []  # and NOT committed → broker will redeliver
+    assert t.dead_lettered == []  # nothing dead-lettered
+    assert t.acked == []  # and NOT acked → broker will redeliver
 
-    # Broker recovers; redelivery now dead-letters and commits.
+    # Broker recovers; redelivery now dead-letters and acks.
     t.fail_publish = False
     m2 = t.add_input(b"{bad json")
     bridge._handle_message(m2)
-    assert t.produced and t.produced[0][0] == "hoglah-jobs-dlt"
-    assert t.committed == [("hoglah-jobs", 0, m2.offset)]
+    assert len(t.dead_lettered) == 1
+    assert t.acked == [("hoglah-jobs", 0, m2.offset)]
 
 
 def test_egress_crash_after_ack_before_mark_is_reemitted(store):

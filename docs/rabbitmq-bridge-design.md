@@ -1,12 +1,19 @@
 # Design Proposal: RabbitMQ Bridge (+ transport generalization)
 
-**Status:** Proposal / draft — **not yet approved, not yet built.**
+**Status:** Approved; **Phase 1 (transport generalization) implemented in v0.5.2.**
+Phases 2–4 (the RabbitMQ adapter + surface + tests) not yet built.
 **Date:** 2026-06-15
-**Author:** drafted by Claude from the "next messaging service" discussion, for review.
+**Author:** drafted by Claude from the "next messaging service" discussion.
 **Builds on:** ADR-018 + `docs/kafka-bridge-design.md` (the Kafka bridge, shipped v0.5.0/0.5.1).
 
-> This is a design document, not an accepted decision. It becomes ADR-019+ (and
-> lands in code) only once the operator approves. Open questions are in §13.
+> **Phase 1 done (v0.5.2):** the §4 generalization landed —
+> `KafkaTransport`→`MessageTransport` (with `commit`→`ack` + new `nack`),
+> `KafkaBridge`→`MessageBridge`, `KafkaMessage`→`Message`; the poison path moved
+> into the transport; Kafka adapter + public surface + the full crash-scenario
+> suite stay green (real-broker round-trip included). Phases 2–4 (the `pika`
+> RabbitMQ adapter, `rabbitmq_*` config + `hoglah rabbitmq-bridge` CLI, gated
+> real-broker test) remain. Open questions in §13 are still open and become
+> ADR-019 when the adapter is built.
 
 ---
 

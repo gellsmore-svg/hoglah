@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.5.2] - 2026-06-15
+
+Internal refactor — no behaviour change, no public API change. Groundwork for
+additional messaging brokers (Phase 1 of the RabbitMQ proposal,
+`docs/rabbitmq-bridge-design.md`).
+
+### Changed
+- **Generalized the Kafka transport seam into a broker-neutral one.** The
+  crash-safety machinery was already broker-agnostic; only the transport was
+  Kafka-specific. Renamed `KafkaTransport`→`MessageTransport`,
+  `KafkaBridge`→`MessageBridge`, `KafkaMessage`→`Message`,
+  `KafkaPublishError`→`MessagePublishError`, with the old names kept as
+  back-compat aliases. The transport's `commit(message)` became `ack(message)`
+  plus a new `nack(message, reason)`, and the poison/dead-letter handling moved
+  out of the bridge into the transport (`ConfluentKafkaTransport.nack` produces
+  to the DLT topic then commits — same behaviour, including "only commit on a
+  confirmed dead-letter write"). This lets a future broker (e.g. RabbitMQ, where
+  `nack` = `basic.nack`→DLX) plug in as one adapter against the same
+  `FakeTransport` crash-scenario test suite. Public surface (`kafka_enabled`,
+  `kafka_*` config, `hoglah kafka-bridge`, ADR-018 semantics) is unchanged; the
+  real-broker round-trip still passes.
+
 ## [0.5.1] - 2026-06-15
 
 Hardening of the v0.5.0 Kafka bridge from a read-only code review. The review
@@ -301,6 +323,7 @@ Critical findings; these close the Should-fix / Nice-to-have items).
 - Tests for persistence, callbacks, worker execution via stub.
 - Initial docs, requirements capture, architecture decisions.
 
+[0.5.2]: https://github.com/gellsmore-svg/hoglah/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/gellsmore-svg/hoglah/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/gellsmore-svg/hoglah/compare/v0.4.0...v0.4.1
