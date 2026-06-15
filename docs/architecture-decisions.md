@@ -2,7 +2,7 @@
 
 **Last updated**: 2026-06-12 (Chunk 3: adapter protocol + real impl + CLI surface complete)
 
-ADRs are append-only. If a decision is reversed, add a new ADR rather than editing the old one, and note the supersession in both entries.
+An **Architecture Decision Record** (the `ADR-NNN` rows below) is one design decision and the reasoning behind it; the `ADR` prefix is just the stable identifier. Records are append-only — if a decision is reversed, add a new one rather than editing the old, and note the supersession in both entries.
 
 ## Accepted Decisions
 

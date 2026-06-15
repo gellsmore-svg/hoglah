@@ -135,10 +135,13 @@ class SQLiteJobStore:
             check_same_thread=False,
         )
         self._conn.row_factory = sqlite3.Row
-        # WAL lets a reader (submit/get from the main thread) proceed while the
-        # worker writes, and busy_timeout makes contending writers wait briefly
-        # instead of failing immediately with "database is locked" — important
-        # once a submitter and a worker (or two worker processes) share the file.
+        # journal_mode=WAL (write-ahead logging): SQLite records changes to a
+        # side-log first, so a reader (submit/get on the main thread) is not
+        # blocked while the worker writes, and vice versa. busy_timeout=5000
+        # makes a contending writer wait up to 5000 ms for the file lock
+        # instead of failing immediately with "database is locked". Both matter
+        # once a submitter and a worker (or two worker processes) share the
+        # single SQLite file.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._lock = threading.Lock()  # protect concurrent access from worker thread + main
