@@ -58,8 +58,12 @@ class MongoJobStore:
 
         self._client = MongoClient(uri)
         self._col = self._client[db_name][collection]
-        # Indexes mirror the SQLite ones: status lookups + the poll order.
-        self._col.create_index([("status", ASCENDING)])
+        # The worker polls `status == QUEUED` then sorts by (priority desc,
+        # created_at asc); this compound index covers that filter+sort in one,
+        # and its `status` prefix also serves the status-only lookups
+        # (get_status_counts / delete_jobs by status). The second index serves
+        # an unfiltered list()'s sort. create_index is idempotent.
+        self._col.create_index([("status", ASCENDING), ("priority", DESCENDING), ("created_at", ASCENDING)])
         self._col.create_index([("priority", DESCENDING), ("created_at", ASCENDING)])
 
     def _doc_to_dict(self, doc: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -82,9 +86,9 @@ class MongoJobStore:
             "tags": tags,
             # …and the raw-string forms SQLiteJobStore also returns, so callers
             # that read request_json/result_json/tags_json keep working.
-            "request_json": json.dumps(request) if request is not None else None,
-            "result_json": json.dumps(result) if result is not None else None,
-            "tags_json": json.dumps(tags),
+            "request_json": json.dumps(request, default=str) if request is not None else None,
+            "result_json": json.dumps(result, default=str) if result is not None else None,
+            "tags_json": json.dumps(tags, default=str),
         }
 
     def enqueue(
@@ -171,9 +175,16 @@ class MongoJobStore:
         """Atomic QUEUED -> PROCESSING. Server-side via find_one_and_update, so
         concurrent workers (even on different machines) each claim a job once —
         no client-side lock or WAL needed."""
+        from pymongo import ReturnDocument
+
+        # return_document=BEFORE is pymongo's default, but pin it explicitly: a
+        # successful claim returns the pre-update doc (not None) and a lost race
+        # / wrong status returns None, so `doc is not None` is the claim result.
+        # Being explicit guards against a future default change inverting this.
         doc = self._col.find_one_and_update(
             {"_id": job_id, "status": JobStatus.QUEUED.value},
             {"$set": {"status": JobStatus.PROCESSING.value, "updated_at": _now_iso()}},
+            return_document=ReturnDocument.BEFORE,
         )
         return doc is not None
 

@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.4.1] - 2026-06-15
+
+Hardening from a read-only code review of the 0.4.0 MongoDB backend (no
+Critical findings; these close the Should-fix / Nice-to-have items).
+
+### Fixed
+- **`MongoJobStore._doc_to_dict` re-serializes with `json.dumps(..., default=str)`**,
+  matching `SQLiteJobStore`. The normal flow already passes through `_bson_safe`,
+  so this only mattered for hand-inserted / migrated documents — but it removes a
+  latent `TypeError` on `get()`/`list()` for such docs and restores exact parity.
+
+### Changed
+- **Atomic claim pins `return_document=ReturnDocument.BEFORE` explicitly**
+  (`claim_for_processing`). It was already the pymongo default; pinning it guards
+  the single most safety-critical line against a future default change silently
+  inverting claim semantics.
+- **Compound index `(status, priority, created_at)`** replaces the standalone
+  `status` index, covering the worker's poll filter+sort in one (its `status`
+  prefix still serves status-only lookups). The `(priority, created_at)` index
+  for unfiltered `list()` sorts is retained.
+
+### Tests
+- Expanded the gated MongoDB suite (`RUN_MONGO_TESTS=1`) from 2 to 7 cases,
+  mirroring the SQLite client/worker contract: list filters (status / tags `$all`
+  / parent) + priority ordering + offset/limit, `update_status(error=None)`
+  COALESCE preservation, `delete_jobs` by status and `before=`, embedding
+  round-trip, and a genuine 16-thread concurrent-claim race proving exactly one
+  winner.
+
 ## [0.4.0] - 2026-06-15
 
 ### Added
@@ -197,5 +226,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests for persistence, callbacks, worker execution via stub.
 - Initial docs, requirements capture, architecture decisions.
 
+[0.4.1]: https://github.com/gellsmore-svg/hoglah/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.3.3...v0.4.0
 [0.2.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.1.0...v0.2.0
