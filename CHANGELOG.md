@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.3.2] - 2026-06-15
+
+### Changed
+- **`cancel()` now interrupts a running job, not just a queued one.** In-flight
+  job tasks are tracked per job_id; `cancel()` (main thread) interrupts the
+  executing task on the worker's loop via `call_soon_threadsafe(task.cancel)`.
+  The CANCELLED result is recorded first and `_process_job` has a race guard
+  that refuses to overwrite a cancellation, and treats `CancelledError`
+  distinctly so an interrupted job never becomes FAILED. Test added (no Ollama).
+- **SQLite store uses WAL + `busy_timeout=5000`.** A reader (submit/get) no
+  longer blocks the worker's writes, and contending writers wait briefly
+  instead of failing immediately with "database is locked" — matters once a
+  submitter and worker (or two worker processes) share the file.
+
 ## [0.3.1] - 2026-06-14
 
 ### Changed
