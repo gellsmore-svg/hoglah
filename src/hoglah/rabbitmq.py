@@ -12,13 +12,16 @@ Why RabbitMQ maps cleanly (see docs/rabbitmq-bridge-design.md §3):
     dead-letter exchange. One broker-side op; no separate "produce to a DLT
     topic" to confirm, so the "dead-lettered but not committed" failure class
     Kafka has does not arise here.
-  - egress = publish with **publisher confirms**; an unconfirmed/unroutable
-    publish raises, so the outbox flips only after a real ack.
+  - egress = publish with **publisher confirms** + `mandatory`; an
+    unconfirmed/unroutable publish raises, so the outbox flips only after a real
+    ack.
 
 `pika` is an optional dependency (`pip install "hoglah[rabbitmq]"`), imported
 lazily. `pika` channels are NOT thread-safe, so this adapter uses a **separate
 publisher connection + channel guarded by a lock** for egress (the consumer
-thread and the per-job egress daemon threads must not share a channel).
+thread and the per-job egress daemon threads must not share a channel), and
+**reconnects the publisher on failure** (an idle publisher connection can be
+dropped by the broker between bursts / across a broker restart).
 """
 
 from __future__ import annotations
@@ -55,48 +58,83 @@ class PikaTransport:
         self._results_queue = results_queue
         self._dlx = dlx
         self._dlq = dlq
-        params = pika.URLParameters(url)
+        self._params = self._build_params(url)
+        self._pub_lock = threading.Lock()
 
         # Consumer connection/channel (used only from the consumer thread).
-        self._conn = pika.BlockingConnection(params)
-        self._ch = self._conn.channel()
-        self._ch.basic_qos(prefetch_count=prefetch)
-        if declare_topology:
-            self._declare_topology()
-
-        # Dedicated publisher connection/channel (pika is not thread-safe), with
-        # publisher confirms so produce_and_flush raises unless the broker acks.
-        self._pub_conn = pika.BlockingConnection(params)
-        self._pub_ch = self._pub_conn.channel()
-        self._pub_ch.confirm_delivery()
-        self._pub_lock = threading.Lock()
+        self._conn = pika.BlockingConnection(self._params)
+        try:
+            self._ch = self._conn.channel()
+            self._ch.basic_qos(prefetch_count=prefetch)
+            if declare_topology:
+                self._declare_topology()
+            # Dedicated publisher connection/channel (pika is not thread-safe),
+            # with publisher confirms so produce_and_flush raises unless acked.
+            self._open_publisher()
+        except Exception:
+            # Don't leak a half-open connection if setup fails partway.
+            for conn_attr in ("_pub_conn", "_conn"):
+                conn = getattr(self, conn_attr, None)
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            raise
 
         # A consume generator with a poll-sized inactivity timeout: each next()
         # blocks up to ~1s and yields (None, None, None) on timeout.
         self._consume_gen = self._ch.consume(self._input_queue, inactivity_timeout=1.0)
 
+    def _build_params(self, url: str) -> Any:
+        params = self._pika.URLParameters(url)
+        # Bound a blocked publish (broker resource alarm / half-open TCP) so
+        # produce_and_flush and shutdown can't hang indefinitely.
+        if params.blocked_connection_timeout is None:
+            params.blocked_connection_timeout = 30
+        return params
+
+    def _open_publisher(self) -> None:
+        self._pub_conn = self._pika.BlockingConnection(self._params)
+        self._pub_ch = self._pub_conn.channel()
+        self._pub_ch.confirm_delivery()
+
+    def _reopen_publisher(self) -> None:
+        try:
+            self._pub_conn.close()
+        except Exception:
+            pass
+        self._open_publisher()
+
     def _declare_topology(self) -> None:
-        # Dead-letter exchange + queue.
-        self._ch.exchange_declare(self._dlx, exchange_type="fanout", durable=True)
-        self._ch.queue_declare(self._dlq, durable=True)
-        self._ch.queue_bind(self._dlq, self._dlx)
-        # Input queue routes rejected messages to the DLX; results queue.
-        self._ch.queue_declare(
-            self._input_queue, durable=True, arguments={"x-dead-letter-exchange": self._dlx}
-        )
-        self._ch.queue_declare(self._results_queue, durable=True)
+        try:
+            # Dead-letter exchange + queue.
+            self._ch.exchange_declare(self._dlx, exchange_type="fanout", durable=True)
+            self._ch.queue_declare(self._dlq, durable=True)
+            self._ch.queue_bind(self._dlq, self._dlx)
+            # Input queue routes rejected messages to the DLX; results queue.
+            self._ch.queue_declare(
+                self._input_queue, durable=True, arguments={"x-dead-letter-exchange": self._dlx}
+            )
+            self._ch.queue_declare(self._results_queue, durable=True)
+        except self._pika.exceptions.ChannelClosedByBroker as exc:
+            raise RuntimeError(
+                "RabbitMQ topology declaration failed — a queue/exchange likely already "
+                f"exists with different settings: {exc}. Either align the settings, or "
+                "pre-provision them and set rabbitmq_declare_topology=False."
+            ) from exc
 
     def poll(self, timeout: float) -> Message | None:
         method, properties, body = next(self._consume_gen)
         if method is None:  # inactivity timeout — no message this tick
             return None
-        key = getattr(properties, "correlation_id", None)
         return Message(
             source=self._input_queue,
             partition=-1,
             offset=method.delivery_tag,
-            key=key,
+            key=getattr(properties, "correlation_id", None),
             value=body or b"",
+            reply_to=getattr(properties, "reply_to", None),
             raw=method,
         )
 
@@ -115,16 +153,30 @@ class PikaTransport:
         props = pika.BasicProperties(correlation_id=key, delivery_mode=2)  # persistent
         with self._pub_lock:
             try:
-                # Default exchange routes by routing_key = queue name. mandatory=True
-                # + publisher confirms → raises if unroutable/unconfirmed, so we
-                # never mark a result published unless a queue actually got it.
-                self._pub_ch.basic_publish(
-                    exchange="", routing_key=dest, body=value, properties=props, mandatory=True
-                )
+                self._publish(dest, value, props)
             except pika.exceptions.UnroutableError as exc:
+                # The destination queue doesn't exist (e.g. a reply_to that was
+                # never declared). Reconnecting won't help — surface it so the
+                # outbox re-emits later (or the caller logs).
                 raise MessagePublishError(f"result unroutable to '{dest}' (no such queue?): {exc}") from exc
-            except Exception as exc:  # NackError / connection errors
-                raise MessagePublishError(str(exc)) from exc
+            except Exception:
+                # The publisher connection may have been dropped (idle heartbeat,
+                # broker restart). Rebuild it once and retry.
+                try:
+                    self._reopen_publisher()
+                    self._publish(dest, value, props)
+                except pika.exceptions.UnroutableError as exc:
+                    raise MessagePublishError(f"result unroutable to '{dest}' (no such queue?): {exc}") from exc
+                except Exception as exc:
+                    raise MessagePublishError(str(exc)) from exc
+
+    def _publish(self, dest: str, value: bytes, props: Any) -> None:
+        # Default exchange routes by routing_key = queue name. mandatory=True +
+        # publisher confirms → raises if unroutable/unconfirmed, so we never mark
+        # a result published unless a queue actually got it.
+        self._pub_ch.basic_publish(
+            exchange="", routing_key=dest, body=value, properties=props, mandatory=True
+        )
 
     def close(self) -> None:
         # Best-effort teardown of both connections.

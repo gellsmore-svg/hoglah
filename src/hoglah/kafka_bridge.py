@@ -60,8 +60,9 @@ class Message:
     source: str  # topic / queue the message came from (informational)
     partition: int  # Kafka partition; -1 for brokers without partitions
     offset: int  # Kafka offset; -1 for brokers without offsets
-    key: str | None
+    key: str | None  # message key; also carries a broker-native correlation_id
     value: bytes
+    reply_to: str | None = None  # broker-native reply destination (e.g. AMQP reply_to)
     error: str | None = None
     raw: Any = None  # underlying client message, used for ack / nack
 
@@ -94,9 +95,16 @@ def dead_letter_envelope(msg: Message, reason: str) -> bytes:
     ).encode("utf-8")
 
 
-def parse_input_message(value: bytes) -> ParsedInput:
+def parse_input_message(
+    value: bytes, *, correlation_id: str | None = None, reply_to: str | None = None
+) -> ParsedInput:
     """Deserialize + validate an input message into a JobRequest. Raises
-    InvalidMessageError for anything un-processable (→ dead-letter)."""
+    InvalidMessageError for anything un-processable (→ dead-letter).
+
+    The JSON body is authoritative. `correlation_id` / `reply_to` passed in (e.g.
+    from a broker's native message properties, like AMQP's) are used only as a
+    fallback when the body omits them — so a property-only message is not
+    poisoned (ADR-019)."""
     try:
         data = json.loads(value)
     except Exception as exc:  # noqa: BLE001 - any decode failure is poison
@@ -104,9 +112,10 @@ def parse_input_message(value: bytes) -> ParsedInput:
     if not isinstance(data, dict):
         raise InvalidMessageError("message is not a JSON object")
 
-    correlation_id = data.get("correlation_id")
-    if not correlation_id or not isinstance(correlation_id, str):
-        raise InvalidMessageError("missing or non-string 'correlation_id'")
+    body_corr = data.get("correlation_id")
+    corr = body_corr if (isinstance(body_corr, str) and body_corr) else correlation_id
+    if not corr or not isinstance(corr, str):
+        raise InvalidMessageError("missing or non-string 'correlation_id' (body or message property)")
 
     model = data.get("model")
     if not model or not isinstance(model, str):
@@ -117,9 +126,10 @@ def parse_input_message(value: bytes) -> ParsedInput:
     if prompt is None and not messages:
         raise InvalidMessageError("must supply 'prompt' or 'messages'")
 
-    reply_to = data.get("reply_to")
-    if reply_to is not None and not isinstance(reply_to, str):
+    body_reply = data.get("reply_to")
+    if body_reply is not None and not isinstance(body_reply, str):
         raise InvalidMessageError("'reply_to' must be a string topic/queue name")
+    rt = body_reply if body_reply is not None else reply_to
     user_meta = data.get("metadata") or {}
     if not isinstance(user_meta, dict):
         raise InvalidMessageError("'metadata' must be an object")
@@ -142,13 +152,13 @@ def parse_input_message(value: bytes) -> ParsedInput:
             # Stash the messaging routing info so egress (live or restart-replay)
             # can address the reply and echo the correlation_id. The key is
             # "_kafka" for backward compatibility with jobs enqueued by v0.5.x.
-            metadata={**user_meta, "_kafka": {"correlation_id": correlation_id, "reply_to": reply_to}},
+            metadata={**user_meta, "_kafka": {"correlation_id": corr, "reply_to": rt}},
             **extra,
         )
     except TypeError as exc:  # a bad/unknown field value
         raise InvalidMessageError(f"could not build job request: {exc}") from exc
 
-    return ParsedInput(request=request, correlation_id=correlation_id, reply_to=reply_to)
+    return ParsedInput(request=request, correlation_id=corr, reply_to=rt)
 
 
 def build_result_message(result_dict: dict[str, Any], correlation_id: str) -> bytes:
@@ -416,7 +426,9 @@ class MessageBridge:
         """Process exactly one input message. Order is load-bearing for crash
         safety: durable idempotent enqueue FIRST, ack only after."""
         try:
-            parsed = parse_input_message(msg.value)
+            # Body is authoritative; the broker's native key/reply_to (e.g. AMQP
+            # properties) are fallbacks when the body omits them.
+            parsed = parse_input_message(msg.value, correlation_id=msg.key, reply_to=msg.reply_to)
         except InvalidMessageError as exc:
             logger.warning(
                 "Poison message from %s[%d]@%d → dead-letter: %s",

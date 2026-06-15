@@ -173,9 +173,10 @@ class Hoglah:
         self._inflight: dict[str, asyncio.Task] = {}
         self._worker_loop_ref: asyncio.AbstractEventLoop | None = None
 
-        # Kafka bridge (ADR-018), created below only when enabled + this instance
-        # runs the worker. None means "no Kafka", and _deliver/close skip it.
-        self._kafka_bridge: Any = None
+        # Messaging bridge (Kafka ADR-018 / RabbitMQ ADR-019), created below only
+        # when enabled + this instance runs the worker. None means "no bridge",
+        # and _deliver/close skip it.
+        self._message_bridge: Any = None
 
         # Attempt restart callback re-delivery for jobs that completed while we were down
         self._redeliver_restart_callbacks()
@@ -202,8 +203,8 @@ class Hoglah:
                 )
             from .kafka_bridge import MessageBridge
 
-            self._kafka_bridge = MessageBridge(store=self._store, config=self.config)
-            self._kafka_bridge.prime()
+            self._message_bridge = MessageBridge(store=self._store, config=self.config)
+            self._message_bridge.prime()
 
         if start_worker:
             self._recover_interrupted_jobs()
@@ -215,8 +216,8 @@ class Hoglah:
             self._start_background_worker()
 
         # Worker is up and the outbox is drained — now start consuming input.
-        if self._kafka_bridge is not None:
-            self._kafka_bridge.start(skip_republish=True)
+        if self._message_bridge is not None:
+            self._message_bridge.start(skip_republish=True)
 
     # ------------------------------------------------------------------ #
     # Public API (matches the spirit of the requirements submit signature)
@@ -816,9 +817,9 @@ class Hoglah:
         # ADR-018: third delivery sink — produce the result back to Kafka (for
         # Kafka-originated jobs). The bridge no-ops for non-Kafka jobs and runs
         # the actual produce on its own thread, so this never blocks the loop.
-        if self._kafka_bridge is not None:
+        if self._message_bridge is not None:
             try:
-                self._kafka_bridge.publish_result(result, request)
+                self._message_bridge.publish_result(result, request)
             except Exception:
                 logger.exception("Kafka result delivery failed for job %s", result.job_id)
 
@@ -875,8 +876,8 @@ class Hoglah:
     def close(self) -> None:
         """Stop worker and close resources."""
         self._worker_running = False
-        if self._kafka_bridge is not None:
-            self._kafka_bridge.stop()
+        if self._message_bridge is not None:
+            self._message_bridge.stop()
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
         if hasattr(self._store, "close"):

@@ -58,9 +58,12 @@ class FakeKafkaTransport:
         self.fail_publish = False
         self._next_offset = 0
 
-    def add_input(self, value: bytes, *, key: str | None = None, topic: str = "hoglah-jobs") -> KafkaMessage:
+    def add_input(
+        self, value: bytes, *, key: str | None = None, reply_to: str | None = None, topic: str = "hoglah-jobs"
+    ) -> KafkaMessage:
         msg = KafkaMessage(
-            source=topic, partition=0, offset=self._next_offset, key=key, value=value, raw=("raw", self._next_offset)
+            source=topic, partition=0, offset=self._next_offset, key=key, value=value,
+            reply_to=reply_to, raw=("raw", self._next_offset),
         )
         self._next_offset += 1
         self._inbox.append(msg)
@@ -267,6 +270,45 @@ def test_reply_to_must_be_a_string():
 
     with pytest.raises(InvalidMessageError):
         parse_input_message(json.dumps({"correlation_id": "c", "model": "m", "prompt": "x", "reply_to": 123}).encode())
+
+
+def test_parse_uses_property_fallbacks_when_body_omits_them():
+    # Body lacks correlation_id/reply_to; broker-native properties supply them.
+    parsed = parse_input_message(
+        json.dumps({"model": "m", "prompt": "hi"}).encode(), correlation_id="cp", reply_to="rp"
+    )
+    assert parsed.correlation_id == "cp"
+    assert parsed.reply_to == "rp"
+    assert parsed.request.metadata["_kafka"] == {"correlation_id": "cp", "reply_to": "rp"}
+
+
+def test_parse_body_wins_over_property_fallback():
+    parsed = parse_input_message(
+        json.dumps({"correlation_id": "cb", "model": "m", "prompt": "hi"}).encode(), correlation_id="cp"
+    )
+    assert parsed.correlation_id == "cb"
+
+
+def test_parse_still_poison_when_correlation_id_absent_everywhere():
+    from hoglah.kafka_bridge import InvalidMessageError
+
+    with pytest.raises(InvalidMessageError):
+        parse_input_message(json.dumps({"model": "m", "prompt": "hi"}).encode())  # no body, no fallback
+
+
+def test_ingress_correlation_id_from_message_key_fallback(store):
+    """A message whose body omits correlation_id but whose broker-native key
+    carries it (e.g. an AMQP property-only message) must still enqueue, not be
+    poisoned."""
+    bridge, t = _bridge(store)
+    msg = t.add_input(json.dumps({"model": "m", "prompt": "hi"}).encode(), key="from-key")
+    bridge._handle_message(msg)
+
+    jobs = store.list()
+    assert len(jobs) == 1
+    assert jobs[0]["request"]["metadata"]["_kafka"]["correlation_id"] == "from-key"
+    assert t.dead_lettered == []
+    assert t.acked == [("hoglah-jobs", 0, msg.offset)]
 
 
 # --------------------------------------------------------------------------- #

@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RabbitMQ 3). Enable at most one of `kafka_enabled` / `rabbitmq_enabled` per
   instance (Kafka wins if both, with a warning). See `docs/rabbitmq-bridge-design.md`.
 
+  Pre-release hardening from a read-only code review (verdict: crash-safe, no
+  Critical issues): the AMQP `correlation_id`/`reply_to` *properties* are now
+  used as a fallback when the JSON body omits them (a property-only message is
+  no longer dead-lettered); the publisher reconnects on failure (an idle
+  publisher connection can be dropped by the broker between bursts / across a
+  restart); a `blocked_connection_timeout` bounds a blocked publish; a partial
+  `__init__` no longer leaks the consumer connection; topology pre-condition
+  clashes raise a clear, actionable error; and the client's bridge attribute is
+  the broker-neutral `_message_bridge`. Deferred to a later patch (operational,
+  not correctness): the fully-supported single-publisher-thread model (the
+  lock + reconnect is the pragmatic interim), consumer-heartbeat servicing
+  during slow enqueues, and `close()`/consumer-thread teardown hardening.
+
 ## [0.5.2] - 2026-06-15
 
 Internal refactor — no behaviour change, no public API change. Groundwork for

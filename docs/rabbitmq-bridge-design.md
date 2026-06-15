@@ -15,12 +15,20 @@ Phases 2–4 = v0.6.0 (the RabbitMQ adapter + config/CLI + gated tests).
 > (`tests/test_rabbitmq.py`) — run green against RabbitMQ 3.
 >
 > §13 decisions as built: **pika** (BlockingConnection); publisher thread-safety
-> = **dedicated publisher connection + lock**; `correlation_id`/`reply_to` read
-> from AMQP properties on the verify side, body fields on the contract side;
-> **at most one bridge per instance** (Kafka wins if both enabled, with a
-> warning) — per-broker `*_enabled` bools kept (no `messaging_backend` selector
-> yet); topology declared on startup unless `rabbitmq_declare_topology=False`;
-> prefetch default **1**.
+> = **dedicated publisher connection + lock + reconnect-on-failure**;
+> `correlation_id`/`reply_to` taken from the JSON body (authoritative) with the
+> AMQP message *properties* as a fallback (§6–7 wording corrected from "win" to
+> "fallback"); **at most one bridge per instance** (Kafka wins if both enabled,
+> with a warning) — per-broker `*_enabled` bools kept (no `messaging_backend`
+> selector yet); topology declared on startup unless
+> `rabbitmq_declare_topology=False`; prefetch default **1**.
+>
+> A pre-release review (no Critical issues; crash-safe) drove the
+> reconnect-on-failure, `blocked_connection_timeout`, partial-`__init__`
+> cleanup, clear topology-clash error, and the property-fallback fix. **Deferred**
+> (operational, not correctness): the fully-supported single-publisher-thread
+> model (§13.2 — the lock + reconnect is the interim), consumer-heartbeat
+> servicing during slow enqueues, and `close()`/consumer-teardown hardening.
 
 ---
 
@@ -95,7 +103,7 @@ than Kafka's:
 | Egress confirm | Idempotent producer + `acks=all` | **Publisher confirms** |
 | Redelivery | Consumer-group rebalance redelivers uncommitted offsets | Un-acked messages auto-redeliver to another competing consumer |
 | Scaling | Consumer group over partitions | Competing consumers over one queue |
-| `correlation_id` / `reply_to` | Carried in the JSON payload | Available as **native AMQP properties** (payload still works as fallback) |
+| `correlation_id` / `reply_to` | Carried in the JSON payload | JSON body authoritative, **native AMQP properties as a fallback** |
 
 Net: the RabbitMQ adapter is *simpler* than the Kafka one on the two paths that
 caused the most subtlety (poison handling and head-of-line blocking), while
@@ -202,9 +210,10 @@ gated real-broker round-trip.
   `republish_unpublished()` re-emits on startup. AMQP has no producer-side
   dedup, so a re-emit is a duplicate message — de-duped downstream by
   `correlation_id`, giving exactly-once *effect* (identical contract to Kafka).
-- **`correlation_id` / `reply_to`** are read from the **native AMQP properties**
-  when present, falling back to the JSON body fields — keeping the cross-broker
-  message contract identical (§7) while using AMQP idioms.
+- **`correlation_id` / `reply_to`** are read from the **JSON body** (authoritative,
+  cross-broker), with the **native AMQP properties as a fallback** when the body
+  omits them — keeping the cross-broker message contract identical (§7) while
+  still accepting AMQP-idiom (property-only) messages.
 
 ---
 
@@ -213,8 +222,10 @@ gated real-broker round-trip.
 **Unchanged from the Kafka bridge** so producers are broker-agnostic. JSON body
 (input → `JobRequest`, output ← `JobResult`) exactly as in
 `docs/kafka-bridge-design.md` §5. The only AMQP-specific nuance: `correlation_id`
-and `reply_to` may be supplied as AMQP message *properties* instead of (or in
-addition to) body fields; properties win when both are set.
+and `reply_to` may be supplied as AMQP message *properties* instead of body
+fields. **As built (v0.6.0): the body is authoritative; the AMQP properties are
+used only as a fallback when the body omits them** (so a property-only message
+isn't dead-lettered, but an explicit body value is never overridden).
 
 Input (body): `{ correlation_id, model, prompt|messages, kind?, options?, tags?,
 reply_to?, metadata? }`. Output (body): `{ correlation_id, job_id, status, model,
