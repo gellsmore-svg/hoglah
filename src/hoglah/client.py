@@ -222,8 +222,9 @@ class Hoglah:
     ) -> str:
         """Submit a job. Returns the job ID immediately.
 
-        The full request is persisted. Execution happens later when a worker
-        picks it up (not implemented in this chunk).
+        The full request is persisted; execution happens asynchronously when a
+        worker picks it up — either this instance's background worker
+        (start_worker=True) or a separate worker daemon sharing the same store.
         """
         if not model:
             raise ValueError("model is required")
