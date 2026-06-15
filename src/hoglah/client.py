@@ -193,13 +193,21 @@ class Hoglah:
         # PRIME (drain the egress outbox) BEFORE the worker starts, so a
         # pre-existing terminal job cannot be published twice — once by the
         # outbox replay, once by the worker's live _deliver.
-        _kafka_on = getattr(self.config, "kafka_enabled", False)
-        _rabbitmq_on = getattr(self.config, "rabbitmq_enabled", False)
-        if start_worker and (_kafka_on or _rabbitmq_on):
-            if _kafka_on and _rabbitmq_on:
+        _enabled = [
+            name
+            for name, flag in (
+                ("kafka", getattr(self.config, "kafka_enabled", False)),
+                ("rabbitmq", getattr(self.config, "rabbitmq_enabled", False)),
+                ("redis", getattr(self.config, "redis_enabled", False)),
+            )
+            if flag
+        ]
+        if start_worker and _enabled:
+            if len(_enabled) > 1:
                 logger.warning(
-                    "Both kafka_enabled and rabbitmq_enabled are set; using Kafka. "
-                    "Enable only one messaging bridge per instance."
+                    "Multiple messaging bridges enabled (%s); using '%s'. "
+                    "Enable only one per instance.",
+                    ", ".join(_enabled), _enabled[0],
                 )
             from .kafka_bridge import MessageBridge
 

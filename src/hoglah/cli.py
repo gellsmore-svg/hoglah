@@ -623,6 +623,54 @@ def rabbitmq_bridge(
         h.close()
 
 
+@app.command("redis-bridge")
+def redis_bridge(
+    db: Path | None = typer.Option(None, "--db"),
+    real: bool = typer.Option(False, "--real", help="Use the real Ollama adapter"),
+    ollama_host: str | None = typer.Option(None, "--ollama-host"),
+    url: str | None = typer.Option(None, "--url", help="Redis URL, e.g. redis://localhost:6379/0"),
+    input_stream: str | None = typer.Option(None, "--input-stream"),
+    results_stream: str | None = typer.Option(None, "--results-stream"),
+    group: str | None = typer.Option(None, "--group"),
+    consumer_name: str | None = typer.Option(None, "--consumer-name"),
+    backend: str | None = typer.Option(None, "--backend", help="Storage backend: sqlite (default) or mongo"),
+) -> None:
+    """Run the worker + Redis Streams bridge in the foreground (ADR-020).
+
+    Consumes job requests from the input stream into the durable queue, processes
+    them with the serial worker, and produces results back to Redis. Blocks until
+    interrupted. Requires `pip install "hoglah[redis]"`.
+    """
+    cfg: dict[str, Any] = {"redis_enabled": True}
+    if db:
+        cfg["db_path"] = db
+    if backend:
+        cfg["backend"] = backend
+    if ollama_host:
+        cfg["ollama_host"] = ollama_host
+    if url:
+        cfg["redis_url"] = url
+    if input_stream:
+        cfg["redis_input_stream"] = input_stream
+    if results_stream:
+        cfg["redis_results_stream"] = results_stream
+    if group:
+        cfg["redis_group"] = group
+    if consumer_name:
+        cfg["redis_consumer_name"] = consumer_name
+
+    h = Hoglah(config=cfg, use_real=real)
+
+    typer.secho("Hoglah Redis Streams bridge running (foreground). Press Ctrl-C to stop.", fg=typer.colors.BLUE)
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        typer.secho("\nShutting down...", fg=typer.colors.YELLOW)
+    finally:
+        h.close()
+
+
 @app.command()
 def models(
     db: Path | None = typer.Option(None, "--db", help="(unused for models but accepted for uniformity)"),

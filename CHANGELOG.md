@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.7.0] - 2026-06-15
+
+### Added
+- **Redis Streams bridge (ADR-020)** — a third messaging transport on the
+  generalized `MessageTransport` seam, with the same crash-safe `MessageBridge`
+  as Kafka and RabbitMQ. Enable with `redis_enabled=True` (or
+  `HOGLAH_REDIS_ENABLED=1`); `redis` is an optional extra
+  (`pip install "hoglah[redis]"`), lazy-imported. New CLI: `hoglah redis-bridge`.
+  Redis Streams is the lightweight, "often already present" option. Mapping:
+  - *Ingress* — `XREADGROUP` with a consumer group; `XACK` (+ best-effort `XDEL`)
+    only after a durable, idempotent enqueue.
+  - *Crash recovery* — a stable consumer name + draining this consumer's
+    Pending Entries List (`XREADGROUP` id `0`) on startup before new messages, so
+    an entry read-but-unacked before a crash is re-processed (idempotent → no dup).
+  - *Poison* — `XADD` to a dead-letter stream then `XACK` (Redis has no broker-side
+    dead-letter; an XADD failure raises → no ack → stays pending).
+  - *Egress* — `XADD` to the results (or `reply_to`) stream; a failed write raises,
+    so the outbox flips only after a durable write.
+  The consumer group is created at id `0` with `MKSTREAM` so pre-group messages
+  aren't missed. Validated by a gated (`RUN_REDIS_TESTS=1`) real-server round-trip
+  + poison→DLQ + PEL-recovery test (green against Redis 7). Enable at most one of
+  `kafka_enabled` / `rabbitmq_enabled` / `redis_enabled` per instance (precedence
+  kafka > rabbitmq > redis; the client warns if several are set).
+
 ## [0.6.0] - 2026-06-15
 
 ### Added
@@ -358,6 +382,7 @@ Critical findings; these close the Should-fix / Nice-to-have items).
 - Tests for persistence, callbacks, worker execution via stub.
 - Initial docs, requirements capture, architecture decisions.
 
+[0.7.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/gellsmore-svg/hoglah/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/gellsmore-svg/hoglah/compare/v0.5.0...v0.5.1

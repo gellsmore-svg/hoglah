@@ -316,12 +316,22 @@ class MessageBridge:
         self._egress_inflight = 0
         # Which broker is active, and the names used for egress + logging. Decided
         # from config now (not lazily) so the egress path works even when a
-        # transport is injected (tests). RabbitMQ only when it alone is enabled;
-        # if both flags are set, Kafka wins (and the client warns).
+        # transport is injected (tests). Checked in precedence order; if several
+        # flags are set the first wins (the client warns). The final else makes
+        # Kafka the default for configs with no *_enabled flag (injected-transport
+        # tests).
         if getattr(config, "rabbitmq_enabled", False) and not getattr(config, "kafka_enabled", False):
             self._broker = "rabbitmq"
             self._input_name = getattr(config, "rabbitmq_input_queue", None)
             self._results_dest = getattr(config, "rabbitmq_results_queue", None)
+        elif (
+            getattr(config, "redis_enabled", False)
+            and not getattr(config, "kafka_enabled", False)
+            and not getattr(config, "rabbitmq_enabled", False)
+        ):
+            self._broker = "redis"
+            self._input_name = getattr(config, "redis_input_stream", None)
+            self._results_dest = getattr(config, "redis_results_stream", None)
         else:
             self._broker = "kafka"
             self._input_name = getattr(config, "kafka_input_topic", None)
@@ -335,6 +345,10 @@ class MessageBridge:
                 from .rabbitmq import create_pika_transport
 
                 self._transport = create_pika_transport(self._config)
+            elif self._broker == "redis":
+                from .redis_streams import create_redis_streams_transport
+
+                self._transport = create_redis_streams_transport(self._config)
             else:
                 self._transport = ConfluentKafkaTransport(
                     bootstrap_servers=self._config.kafka_bootstrap_servers,

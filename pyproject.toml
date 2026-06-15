@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoglah"
-version = "0.6.0"
+version = "0.7.0"
 description = "Lightweight local-first job queue manager and Ollama wrapper for resource-constrained environments."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -58,6 +58,9 @@ kafka = [
 ]
 rabbitmq = [
     "pika>=1.3",  # RabbitMQ bridge (rabbitmq_enabled=True, ADR-019)
+]
+redis = [
+    "redis>=5.0",  # Redis Streams bridge (redis_enabled=True, ADR-020)
 ]
 
 [project.scripts]

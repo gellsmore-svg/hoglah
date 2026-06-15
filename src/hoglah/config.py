@@ -121,6 +121,39 @@ class HoglahSettings(BaseSettings):
         "Turn off if the operator pre-provisions them on a locked-down cluster.",
     )
 
+    # Redis Streams bridge (ADR-020) — third messaging transport, same crash-safe
+    # MessageBridge. Off by default; needs `pip install "hoglah[redis]"`.
+    # Enable at most one of kafka_enabled / rabbitmq_enabled / redis_enabled.
+    redis_enabled: bool = Field(
+        default=False,
+        description="Enable the Redis Streams bridge (consume job requests + produce results). Off by default.",
+    )
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Redis connection URL.",
+    )
+    redis_input_stream: str = Field(
+        default="hoglah-jobs",
+        description="Stream Hoglah consumes job requests from.",
+    )
+    redis_results_stream: str = Field(
+        default="hoglah-results",
+        description="Default stream Hoglah produces results to (overridable per-message by reply_to).",
+    )
+    redis_dlq_stream: str = Field(
+        default="hoglah-jobs-dlq",
+        description="Dead-letter stream for un-processable ('poison') input messages.",
+    )
+    redis_group: str = Field(
+        default="hoglah",
+        description="Redis Streams consumer group (members share the input stream).",
+    )
+    redis_consumer_name: str = Field(
+        default="hoglah-1",
+        description="Consumer name within the group. Stable across restarts so a crashed "
+        "consumer's pending (unacked) messages are recovered. Use distinct names per process.",
+    )
+
     # Concurrency control (ADR-003)
     concurrency: int = Field(
         default=1,

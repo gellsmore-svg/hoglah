@@ -47,6 +47,8 @@ pip install "hoglah[mongo]"
 pip install "hoglah[kafka]"
 # With the RabbitMQ bridge (optional — adds pika)
 pip install "hoglah[rabbitmq]"
+# With the Redis Streams bridge (optional — adds redis)
+pip install "hoglah[redis]"
 ```
 Hoglah is published on PyPI: https://pypi.org/project/hoglah/
 
@@ -267,7 +269,34 @@ and echoed back). RabbitMQ's per-message model is a particularly clean fit:
 ingress acks each message after a durable enqueue (no head-of-line blocking),
 poison messages are `nack`'d to a **dead-letter exchange**, and egress uses
 **publisher confirms** so a result is marked delivered only after the broker
-acks it. Enable at most one of the Kafka / RabbitMQ bridges per instance.
+acks it. Enable at most one of the Kafka / RabbitMQ / Redis bridges per instance.
+
+## Redis Streams bridge (optional)
+
+The lightest-weight option — Redis is often already in the stack. Same message
+contract and crash-safety guarantees.
+
+```bash
+pip install "hoglah[redis]"
+hoglah redis-bridge --url redis://localhost:6379/0 \
+                    --input-stream hoglah-jobs --results-stream hoglah-results
+```
+
+```python
+h = Hoglah(config={
+    "redis_enabled": True,
+    "redis_url": "redis://localhost:6379/0",
+    "redis_input_stream": "hoglah-jobs",
+    "redis_results_stream": "hoglah-results",
+    "redis_consumer_name": "hoglah-1",   # stable across restarts for crash recovery
+})
+```
+
+Uses a consumer group with explicit `XACK` after a durable enqueue; a
+consumer's unacked entries (its Pending Entries List) are recovered on restart
+via a stable consumer name, so a crash mid-processing re-delivers rather than
+loses. Poison messages go to a dead-letter stream. Run several `redis-bridge`
+processes (distinct `--consumer-name`s) in one group to scale out.
 
 ## V1 Scope
 
