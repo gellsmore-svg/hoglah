@@ -522,6 +522,13 @@ class Hoglah:
                     if not self._worker_running:
                         break
                     job_id = row["id"]
+                    # Skip a job already in flight: a task created on a prior
+                    # poll may not have claimed it yet (claim flips QUEUED→
+                    # PROCESSING), so it can still appear QUEUED here. Spawning a
+                    # second task would overwrite self._inflight[job_id] and make
+                    # cancel() target the wrong task.
+                    if job_id in self._inflight:
+                        continue
                     # Acquire slot and process (fire and forget the task)
                     await sem.acquire()
                     task = asyncio.create_task(self._process_job(job_id, sem))
@@ -537,7 +544,10 @@ class Hoglah:
 
         # Graceful drain on shutdown: let in-flight jobs finish within a
         # bounded window (under close()'s 3s thread-join), then cancel any
-        # stragglers so set_result still records a terminal state.
+        # stragglers. A cancelled straggler is left in PROCESSING (no terminal
+        # result written here) on purpose: the next worker startup's
+        # _recover_interrupted_jobs re-queues PROCESSING jobs for retry
+        # (DQ-004). Writing a terminal result here would defeat that recovery.
         pending = {t for t in self._inflight.values() if not t.done()}
         if pending:
             done, still = await asyncio.wait(pending, timeout=_SHUTDOWN_DRAIN_SECONDS)
@@ -586,8 +596,13 @@ class Hoglah:
             return
         except Exception:
             logger.exception("Unexpected error processing job %s", job_id)
-            # Best effort: record failure
+            # Best effort: record failure — but not if cancel() already flipped
+            # this job to CANCELLED (same race guard as the success path; a
+            # cancellation must not be clobbered by a FAILED row).
             try:
+                latest = self._store.get(job_id)
+                if latest and JobStatus(latest["status"]) == JobStatus.CANCELLED:
+                    return
                 err_result = JobResult(
                     job_id=job_id,
                     status=JobStatus.FAILED,
