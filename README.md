@@ -45,6 +45,8 @@ pip install "hoglah[cli]"
 pip install "hoglah[mongo]"
 # With the Kafka bridge (optional — adds confluent-kafka)
 pip install "hoglah[kafka]"
+# With the RabbitMQ bridge (optional — adds pika)
+pip install "hoglah[rabbitmq]"
 ```
 Hoglah is published on PyPI: https://pypi.org/project/hoglah/
 
@@ -238,6 +240,34 @@ and doubles as the idempotency key.
 Scale horizontally by running several `hoglah kafka-bridge` processes in one
 consumer group; each keeps its own serial worker. Sharing one MongoDB store
 gives fleet-wide exactly-once execution via the server-side atomic claim.
+
+## RabbitMQ bridge (optional)
+
+The same bridge runs over RabbitMQ (AMQP) instead of Kafka — identical message
+contract and crash-safety guarantees, a different broker. Use it if you run
+RabbitMQ rather than a Kafka cluster.
+
+```bash
+pip install "hoglah[rabbitmq]"
+hoglah rabbitmq-bridge --url amqp://guest:guest@localhost:5672/ \
+                       --input-queue hoglah-jobs --results-queue hoglah-results
+```
+
+```python
+h = Hoglah(config={
+    "rabbitmq_enabled": True,
+    "rabbitmq_url": "amqp://guest:guest@localhost:5672/",
+    "rabbitmq_input_queue": "hoglah-jobs",
+    "rabbitmq_results_queue": "hoglah-results",
+})
+```
+
+Same input/output messages as the Kafka bridge (a `correlation_id` is required
+and echoed back). RabbitMQ's per-message model is a particularly clean fit:
+ingress acks each message after a durable enqueue (no head-of-line blocking),
+poison messages are `nack`'d to a **dead-letter exchange**, and egress uses
+**publisher confirms** so a result is marked delivered only after the broker
+acks it. Enable at most one of the Kafka / RabbitMQ bridges per instance.
 
 ## V1 Scope
 

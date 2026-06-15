@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - (none yet)
 
+## [0.6.0] - 2026-06-15
+
+### Added
+- **RabbitMQ (AMQP) bridge (ADR-019)** — a second messaging transport on the
+  generalized `MessageTransport` seam, with the same crash-safe `MessageBridge`
+  as Kafka. Enable with `rabbitmq_enabled=True` (or `HOGLAH_RABBITMQ_ENABLED=1`);
+  `pika` is an optional extra (`pip install "hoglah[rabbitmq]"`), lazy-imported.
+  New CLI: `hoglah rabbitmq-bridge`. RabbitMQ maps to the crash-safety contract
+  *more cleanly* than Kafka:
+  - *Ingress* — per-message `basic_ack` after a durable, idempotent enqueue (no
+    head-of-line partition blocking).
+  - *Poison* — `basic_nack(requeue=False)` → dead-letter exchange; one broker-side
+    op, so the "dead-lettered but not committed" failure class doesn't arise.
+  - *Egress* — publisher confirms (+ `mandatory`), so the outbox flips only after
+    a real broker ack; exactly-once *effect* via `correlation_id` dedup.
+  `pika` channels aren't thread-safe, so the adapter uses a dedicated publisher
+  connection + lock. Topology (input/results/DLX/DLQ) is declared idempotently on
+  startup unless `rabbitmq_declare_topology=False`. Validated by a gated
+  (`RUN_RABBITMQ_TESTS=1`) real-broker round-trip + poison→DLQ test (green against
+  RabbitMQ 3). Enable at most one of `kafka_enabled` / `rabbitmq_enabled` per
+  instance (Kafka wins if both, with a warning). See `docs/rabbitmq-bridge-design.md`.
+
 ## [0.5.2] - 2026-06-15
 
 Internal refactor — no behaviour change, no public API change. Groundwork for
@@ -323,6 +345,7 @@ Critical findings; these close the Should-fix / Nice-to-have items).
 - Tests for persistence, callbacks, worker execution via stub.
 - Initial docs, requirements capture, architecture decisions.
 
+[0.6.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/gellsmore-svg/hoglah/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/gellsmore-svg/hoglah/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/gellsmore-svg/hoglah/compare/v0.4.1...v0.5.0

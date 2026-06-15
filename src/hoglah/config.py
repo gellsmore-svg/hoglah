@@ -83,6 +83,44 @@ class HoglahSettings(BaseSettings):
         description="Kafka consumer group id (members share the input-topic partitions).",
     )
 
+    # RabbitMQ bridge (ADR-019) — second messaging transport, same crash-safe
+    # MessageBridge as Kafka. Off by default; needs `pip install "hoglah[rabbitmq]"`.
+    # Enable at most one of kafka_enabled / rabbitmq_enabled per instance.
+    rabbitmq_enabled: bool = Field(
+        default=False,
+        description="Enable the RabbitMQ bridge (consume job requests + produce results). Off by default.",
+    )
+    rabbitmq_url: str = Field(
+        default="amqp://guest:guest@localhost:5672/",
+        description="RabbitMQ connection URL (AMQP).",
+    )
+    rabbitmq_input_queue: str = Field(
+        default="hoglah-jobs",
+        description="Queue Hoglah consumes job requests from.",
+    )
+    rabbitmq_results_queue: str = Field(
+        default="hoglah-results",
+        description="Default queue Hoglah produces results to (overridable per-message by reply_to).",
+    )
+    rabbitmq_dlx: str = Field(
+        default="hoglah-dlx",
+        description="Dead-letter exchange for un-processable ('poison') input messages.",
+    )
+    rabbitmq_dlq: str = Field(
+        default="hoglah-jobs-dlq",
+        description="Dead-letter queue bound to the dead-letter exchange.",
+    )
+    rabbitmq_prefetch: int = Field(
+        default=1,
+        ge=1,
+        description="Max unacknowledged messages a consumer holds at once (backpressure).",
+    )
+    rabbitmq_declare_topology: bool = Field(
+        default=True,
+        description="Declare the input/results/dead-letter queues + DLX on startup (idempotent). "
+        "Turn off if the operator pre-provisions them on a locked-down cluster.",
+    )
+
     # Concurrency control (ADR-003)
     concurrency: int = Field(
         default=1,

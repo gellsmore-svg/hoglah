@@ -578,6 +578,51 @@ def kafka_bridge(
         h.close()
 
 
+@app.command("rabbitmq-bridge")
+def rabbitmq_bridge(
+    db: Path | None = typer.Option(None, "--db"),
+    real: bool = typer.Option(False, "--real", help="Use the real Ollama adapter"),
+    ollama_host: str | None = typer.Option(None, "--ollama-host"),
+    url: str | None = typer.Option(None, "--url", help="AMQP URL, e.g. amqp://guest:guest@localhost:5672/"),
+    input_queue: str | None = typer.Option(None, "--input-queue"),
+    results_queue: str | None = typer.Option(None, "--results-queue"),
+    prefetch: int | None = typer.Option(None, "--prefetch"),
+    backend: str | None = typer.Option(None, "--backend", help="Storage backend: sqlite (default) or mongo"),
+) -> None:
+    """Run the worker + RabbitMQ bridge in the foreground (ADR-019).
+
+    Consumes job requests from the input queue into the durable queue, processes
+    them with the serial worker, and produces results back to RabbitMQ. Blocks
+    until interrupted. Requires `pip install "hoglah[rabbitmq]"`.
+    """
+    cfg: dict[str, Any] = {"rabbitmq_enabled": True}
+    if db:
+        cfg["db_path"] = db
+    if backend:
+        cfg["backend"] = backend
+    if ollama_host:
+        cfg["ollama_host"] = ollama_host
+    if url:
+        cfg["rabbitmq_url"] = url
+    if input_queue:
+        cfg["rabbitmq_input_queue"] = input_queue
+    if results_queue:
+        cfg["rabbitmq_results_queue"] = results_queue
+    if prefetch is not None:
+        cfg["rabbitmq_prefetch"] = prefetch
+
+    h = Hoglah(config=cfg, use_real=real)
+
+    typer.secho("Hoglah RabbitMQ bridge running (foreground). Press Ctrl-C to stop.", fg=typer.colors.BLUE)
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        typer.secho("\nShutting down...", fg=typer.colors.YELLOW)
+    finally:
+        h.close()
+
+
 @app.command()
 def models(
     db: Path | None = typer.Option(None, "--db", help="(unused for models but accepted for uniformity)"),

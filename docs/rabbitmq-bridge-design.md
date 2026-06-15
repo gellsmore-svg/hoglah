@@ -1,19 +1,26 @@
 # Design Proposal: RabbitMQ Bridge (+ transport generalization)
 
-**Status:** Approved; **Phase 1 (transport generalization) implemented in v0.5.2.**
-Phases 2–4 (the RabbitMQ adapter + surface + tests) not yet built.
+**Status:** **Implemented (ADR-019).** Phase 1 = v0.5.2 (transport generalization);
+Phases 2–4 = v0.6.0 (the RabbitMQ adapter + config/CLI + gated tests).
 **Date:** 2026-06-15
 **Author:** drafted by Claude from the "next messaging service" discussion.
 **Builds on:** ADR-018 + `docs/kafka-bridge-design.md` (the Kafka bridge, shipped v0.5.0/0.5.1).
 
-> **Phase 1 done (v0.5.2):** the §4 generalization landed —
-> `KafkaTransport`→`MessageTransport` (with `commit`→`ack` + new `nack`),
-> `KafkaBridge`→`MessageBridge`, `KafkaMessage`→`Message`; the poison path moved
-> into the transport; Kafka adapter + public surface + the full crash-scenario
-> suite stay green (real-broker round-trip included). Phases 2–4 (the `pika`
-> RabbitMQ adapter, `rabbitmq_*` config + `hoglah rabbitmq-bridge` CLI, gated
-> real-broker test) remain. Open questions in §13 are still open and become
-> ADR-019 when the adapter is built.
+> **Done.** Phase 1 (v0.5.2): the §4 generalization —
+> `KafkaTransport`→`MessageTransport` (`commit`→`ack` + new `nack`),
+> `KafkaBridge`→`MessageBridge`, `KafkaMessage`→`Message`; poison path moved into
+> the transport. Phases 2–4 (v0.6.0): `PikaTransport` (`src/hoglah/rabbitmq.py`),
+> `rabbitmq_*` config + `hoglah rabbitmq-bridge` CLI + `hoglah[rabbitmq]` extra,
+> and gated (`RUN_RABBITMQ_TESTS=1`) real-broker round-trip + poison→DLQ tests
+> (`tests/test_rabbitmq.py`) — run green against RabbitMQ 3.
+>
+> §13 decisions as built: **pika** (BlockingConnection); publisher thread-safety
+> = **dedicated publisher connection + lock**; `correlation_id`/`reply_to` read
+> from AMQP properties on the verify side, body fields on the contract side;
+> **at most one bridge per instance** (Kafka wins if both enabled, with a
+> warning) — per-broker `*_enabled` bools kept (no `messaging_backend` selector
+> yet); topology declared on startup unless `rabbitmq_declare_topology=False`;
+> prefetch default **1**.
 
 ---
 

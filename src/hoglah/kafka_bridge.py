@@ -304,19 +304,34 @@ class MessageBridge:
         # producer is closed.
         self._egress_lock = threading.Lock()
         self._egress_inflight = 0
+        # Which broker is active, and the names used for egress + logging. Decided
+        # from config now (not lazily) so the egress path works even when a
+        # transport is injected (tests). RabbitMQ only when it alone is enabled;
+        # if both flags are set, Kafka wins (and the client warns).
+        if getattr(config, "rabbitmq_enabled", False) and not getattr(config, "kafka_enabled", False):
+            self._broker = "rabbitmq"
+            self._input_name = getattr(config, "rabbitmq_input_queue", None)
+            self._results_dest = getattr(config, "rabbitmq_results_queue", None)
+        else:
+            self._broker = "kafka"
+            self._input_name = getattr(config, "kafka_input_topic", None)
+            self._results_dest = getattr(config, "kafka_results_topic", None)
 
     # -- lifecycle --------------------------------------------------------- #
 
     def _ensure_transport(self) -> MessageTransport:
-        # Phase 1: Kafka is the only built-in adapter, so the bridge defaults to
-        # it from the kafka_* config. A future transport selector branches here.
         if self._transport is None:
-            self._transport = ConfluentKafkaTransport(
-                bootstrap_servers=self._config.kafka_bootstrap_servers,
-                group_id=self._config.kafka_group_id,
-                input_topic=self._config.kafka_input_topic,
-                dlt_topic=self._config.kafka_dlt_topic,
-            )
+            if self._broker == "rabbitmq":
+                from .rabbitmq import create_pika_transport
+
+                self._transport = create_pika_transport(self._config)
+            else:
+                self._transport = ConfluentKafkaTransport(
+                    bootstrap_servers=self._config.kafka_bootstrap_servers,
+                    group_id=self._config.kafka_group_id,
+                    input_topic=self._config.kafka_input_topic,
+                    dlt_topic=self._config.kafka_dlt_topic,
+                )
         return self._transport
 
     def prime(self) -> None:
@@ -346,10 +361,8 @@ class MessageBridge:
         )
         self._thread.start()
         logger.info(
-            "Messaging bridge started (in='%s' results='%s' group='%s')",
-            self._config.kafka_input_topic,
-            self._config.kafka_results_topic,
-            self._config.kafka_group_id,
+            "Messaging bridge started (broker=%s in='%s' results='%s')",
+            self._broker, self._input_name, self._results_dest,
         )
 
     def stop(self) -> None:
@@ -472,7 +485,7 @@ class MessageBridge:
         post-ack mark fails — leave it unpublished so startup recovery re-emits
         it (a re-emit is a duplicate, de-duped downstream by correlation_id)."""
         assert self._transport is not None
-        dest = reply_to or self._config.kafka_results_topic
+        dest = reply_to or self._results_dest
         try:
             self._transport.produce_and_flush(dest, correlation_id, value)
         except Exception:
