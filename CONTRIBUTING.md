@@ -1,73 +1,60 @@
 # Contributing to Hoglah
 
-This file records the working conventions for collaboration between the operator, a maintainer, and other agents on the Hoglah repository. It is intentionally short. If something is unclear, prefer adding to this file over repeating the same discussion.
+Thanks for your interest in Hoglah. This guide covers local development.
 
-## Roles
+## Development setup
 
-- **Operator** — the human owner of the project. Makes architectural and scope decisions.
-- **a maintainer** — typically runs with elevated privileges in the environment and handles `git push` to the remote when needed.
-- **Claude / other agents** — implement, document, and propose within the operator's stated direction. Commit locally; do not assume push rights.
-
-## Agent commit attribution
-
-When an agent (a reviewer, Claude, etc.) does the bulk of the implementation work for a set of changes, include a `Co-authored-by` trailer in the commit message. This ensures the agent's contribution is properly credited on GitHub (the trailer is what GitHub uses to display co-authors, even when the primary `Author` of the commit is the human operator/a maintainer).
-
-**For a reviewer (xAI):**
-```
-Co-authored-by: a reviewer <code@x.ai>
+```bash
+git clone https://github.com/gellsmore-svg/hoglah
+cd hoglah
+python -m venv .venv
+.venv/bin/pip install -e ".[dev,cli]"
 ```
 
-Example commit message body:
+Optional backends/transports add extras: `.[mongo]`, `.[kafka]`, `.[rabbitmq]`,
+`.[redis]`.
 
+## Running tests
+
+```bash
+pytest                 # full suite; the default adapter needs no Ollama
+ruff check src tests   # lint
 ```
-feat: add graceful shutdown and timeout enforcement
 
-- ... summary of changes ...
-- Verified real Ollama end-to-end with gateway host.
+Integration tests that need external services are gated behind environment flags
+and skipped by default:
 
-Co-authored-by: a reviewer <code@x.ai>
-```
+- `RUN_OLLAMA_TESTS=1` — a local Ollama with a small model (e.g. `gemma3:1b`).
+- `RUN_MONGO_TESTS=1` — a MongoDB at `mongodb://localhost:27017`.
+- `RUN_KAFKA_TESTS=1` / `RUN_RABBITMQ_TESTS=1` / `RUN_REDIS_TESTS=1` — a local
+  broker for the corresponding bridge.
 
-- The human operator remains the `Author` on the commit.
-- a maintainer (or operator) performs the actual `git push`.
-- This convention applies starting from the next agent-driven work.
+Please keep the default (unflagged) suite green and ruff-clean, and add a test for
+any behaviour change.
 
-## Restart-doc discipline (highly recommended for long-running work)
-
-Two files carry project state across sessions:
-
-- `.restart.md` — *canonical current state*. Tight, human-readable summary of status, next step, open decisions, and key files. Surgical edits preferred. Save pre-edit snapshots (`.restart.md.<context>-<date>.bak`) before large rewrites.
-- `.session-log.md` — *how we got here*. Append-only chronological narrative. Use dated agent headings. Never rewrite history; add corrections as new entries.
-
-## Cadence & chunking
-
-Break multi-step work into visible, named chunks. Typical pattern in responses:
-
-> "Chunk N — short description. Doing X."
-> [tool calls]
-> "Chunk N done. Next: chunk N+1."
-
-## Standing rules (derived from requirements and family conventions)
-
-- V1 scope is deliberately narrow: reliable local Ollama job queue + Python API + persistence + basic callbacks. Ask before expanding beyond the Non-Goals in `docs/requirements-v1.0.md`.
-- Keep the implementation lightweight. Prefer stdlib + a small number of well-chosen dependencies (ollama client, pydantic, typer or argparse for CLI, etc.).
-- Source preservation and auditability matter: job inputs, parameters, and final outputs should remain inspectable.
-- Callbacks and side effects must be isolated; a failing callback must never lose the job result.
-- Document decisions in `docs/architecture-decisions.md` (append-only table style) or as new `.session-log.md` entries.
-- Match the style and quality bar of sister domains (a separate application, a name) for docs, tests, and packaging.
-
-## Code conventions (initial)
+## Code conventions
 
 - Python 3.11+
-- Source under `src/hoglah/`
-- Tests under `tests/`
-- Use `pyproject.toml` (setuptools) for packaging and CLI entry points
-- Configuration: support constructor overrides + environment variables + small config file
-- Runtime state (default): `~/.hoglah/` for the SQLite DB and logs (gitignored)
-- All public surfaces (submit parameters, JobResult, status enum, etc.) should be clearly typed
+- Source under `src/hoglah/`, tests under `tests/`
+- Public surfaces (submit parameters, `JobResult`, status enum, config) are typed
+- Configuration via constructor overrides + `HOGLAH_*` environment variables
+- Keep dependencies light; new runtime deps should be optional extras where possible
+- Architecture decisions are recorded (append-only) in
+  `docs/architecture-decisions.md`
 
-## Working with the domains family
+## Releasing (maintainers)
 
-Hoglah lives alongside AMS, context, healing, a separate application, a name, Relational-Substrate, etc. under `~/domains/`. The projects share a local-first, privacy-focused, restart-resilient philosophy but are intentionally **runtime independent**. Cross-pollination via reading each other's code and docs is encouraged; direct imports between projects should be a deliberate later decision recorded in architecture docs.
+Releases are automated. Bump the version in `pyproject.toml`, update
+`CHANGELOG.md`, commit, then push a tag:
 
-Hoglah's job queue may eventually be useful to other domains (e.g. background work in a name or a separate application REM jobs), but any integration is future work and must respect each project's independence.
+```bash
+git tag vX.Y.Z && git push origin vX.Y.Z
+```
+
+The tag triggers `.github/workflows/release.yml`, which builds the wheel + sdist,
+creates the GitHub Release, and publishes to PyPI via OIDC trusted publishing.
+
+## Reporting issues
+
+Bugs and questions: <https://github.com/gellsmore-svg/hoglah/issues>. Security
+issues: please report privately — see [SECURITY.md](SECURITY.md).

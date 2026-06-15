@@ -118,7 +118,7 @@ class HoglahSettings(BaseSettings):
     rabbitmq_declare_topology: bool = Field(
         default=True,
         description="Declare the input/results/dead-letter queues + DLX on startup (idempotent). "
-        "Turn off if the operator pre-provisions them on a locked-down cluster.",
+        "Turn off if topology is pre-provisioned on a locked-down cluster.",
     )
 
     # Redis Streams bridge (ADR-020) — third messaging transport, same crash-safe

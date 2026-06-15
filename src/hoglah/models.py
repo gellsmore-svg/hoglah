@@ -25,7 +25,7 @@ class JobStatus(str, Enum):
 class JobResult:
     """Public result for a finished (or failed) job.
 
-    Per operator guidance (ADR-009):
+    Per ADR-009:
     - Always attempt to produce a result even if context truncation occurred.
     - Include explicit truncation metadata so callers know when the supplied
       prompt/context was (or may have been) truncated.

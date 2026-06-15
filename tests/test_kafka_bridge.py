@@ -312,7 +312,7 @@ def test_ingress_correlation_id_from_message_key_fallback(store):
 
 
 # --------------------------------------------------------------------------- #
-# Regression tests for the hardening findings (v0.5.1)
+# Regression tests for the v0.5.1 hardening findings
 # --------------------------------------------------------------------------- #
 
 

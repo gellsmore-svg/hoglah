@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Internal working/state docs — never publish
+.restart.md
+.restart.md.*.bak
+.session-log.md

@@ -239,8 +239,8 @@ parent_job_id, timings, metadata }`.
 - **Topology declaration.** On startup, optionally declare (idempotently) the
   durable input queue, the results queue, the DLX, and the dead-letter queue with
   the input queue's `x-dead-letter-exchange` argument set. Make declaration
-  switchable off for locked-down clusters where the operator pre-provisions
-  everything (open decision §13.5).
+  switchable off for locked-down clusters where topology is pre-provisioned
+  (open decision §13.5).
 - **Threading — note the pika caveat.** Unlike `confluent-kafka`'s thread-safe
   producer, **pika channels/connections are not thread-safe.** The consumer runs
   on its own thread (as today). Egress publishes happen from per-job daemon
@@ -299,7 +299,7 @@ env + constructor config. Off unless enabled.
 ## 12. Non-goals (v1 of the RabbitMQ bridge)
 
 - Hoglah does **not** manage the RabbitMQ cluster (vhosts, users, policies,
-  quorum/mirrored-queue config are the operator's infra).
+  quorum/mirrored-queue config are deployment infra).
 - **No AMQP transactions (`tx.*`)** — publisher confirms are lighter and
   sufficient.
 - **No exactly-once via the broker** — exactly-once *effect* via `correlation_id`
@@ -327,7 +327,7 @@ env + constructor config. Off unless enabled.
    And whether to introduce a unified `messaging_backend` selector now or keep
    per-broker `*_enabled` bools (back-compat with the released `kafka_enabled`).
 5. **Topology declaration** — declare durable queues + DLX on startup
-   (idempotent, recommended default) vs assume operator pre-declares (for
+   (idempotent, recommended default) vs assume topology is pre-declared (for
    locked-down clusters). Exposed as `rabbitmq_declare_topology`.
 6. **Prefetch default** — `1` (strict serial backpressure) vs a small N for
    pipelining ingest ahead of the worker.

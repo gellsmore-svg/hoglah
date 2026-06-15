@@ -2,13 +2,13 @@
 
 **Project Name**: Hoglah  
 **Version**: 1.0 (Initial)  
-**Theme**: Named after one of the daughters of Zelophehad (Numbers 26/27/36, Joshua 17), continuing the Old Testament women's names pattern (a name, a name, etc.).
+**Theme**: Named after one of the daughters of Zelophehad (Numbers 26/27/36, Joshua 17).
 
-**Captured**: 2026-06-12 (verbatim from initial operator submission)
+**Captured**: 2026-06-12 (initial specification)
 
 ---
 
-This document captures the operator's initial Hoglah requirements **verbatim**. Subsequent requirement versions should be filed alongside this one (`requirements-v1.1.md`, etc.) rather than overwriting it, so the evolution of the spec stays inspectable.
+This document captures the initial Hoglah requirements **verbatim**. Subsequent requirement versions should be filed alongside this one (`requirements-v1.1.md`, etc.) rather than overwriting it, so the evolution of the spec stays inspectable.
 
 ## 1. Description / Overview
 Hoglah is a lightweight, local-first job queue manager and Ollama wrapper designed for resource-constrained environments. It enables applications to submit LLM inference requests asynchronously (or with controlled concurrency), receive a job ID immediately, monitor progress, retrieve results, and receive completion callbacks. 

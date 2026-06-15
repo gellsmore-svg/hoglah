@@ -246,7 +246,7 @@ on every poll). Policy:
 - **Horizontal scale:** run N Hoglah instances in one consumer group; Kafka
   hands each a subset of partitions. Each instance keeps its own **serial**
   worker (concurrency=1 default), so the fleet does N jobs concurrently while
-  any single LLM instance stays serial — exactly the operator's stated goal.
+  any single LLM instance stays serial — exactly the stated goal.
 - **Exactly-once execution across the fleet:** if the N instances share **one
   MongoDB `JobStore`**, the v0.4.0 server-side atomic claim already guarantees
   each job runs once even if (via redelivery/rebalance) it were enqueued from
@@ -330,7 +330,7 @@ Kept deliberately small, in the spirit of the existing V1 non-goals:
    asyncio, would integrate with the worker's event loop) or **`kafka-python`**
    (pure-python, lighter, but less actively maintained). The dedicated-thread
    design (§7) means we do *not* need an asyncio-native client, which argues for
-   `confluent-kafka`'s reliability. **Needs operator pick.**
+   `confluent-kafka`'s reliability. **Needs a decision.**
 2. **Idempotency key column/field** — confirm `correlation_id` becomes the
    Hoglah `job_id` directly, vs a separate unique `correlation_id` field with an
    internal UUID job_id. (Former is simplest; latter decouples external id from
