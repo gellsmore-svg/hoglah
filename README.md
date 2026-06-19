@@ -298,6 +298,21 @@ The real adapter talks to Ollama (which uses llama.cpp for inference). Enable it
 with `use_real=True` / `--real` / `HOGLAH_USE_REAL_ADAPTER=1`, and make sure the
 model is available (`hoglah pull <model>` or auto-pull on first real submit).
 
+**Installing models from Hugging Face.** Ollama can pull any GGUF model straight
+from the Hugging Face Hub, so `hoglah pull` does too — just use an `hf.co/...`
+name with the quant as the tag:
+
+```bash
+hoglah pull --real "hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
+# then submit to it like any other model:
+hoglah submit "hello" --model "hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M" --real --wait
+```
+
+The model then works everywhere a model name is accepted (CLI, library, the
+messaging bridges). Size it to your hardware: a model must fit in VRAM (with
+spillover to system RAM, which is much slower on CPU) — frontier models like
+MiniMax-M3 or Kimi-K2 (hundreds of GB) need server-class hardware, not a laptop.
+
 **WSL2:** if Ollama runs as the Windows binary and your code runs in WSL, the
 daemon is *not* reachable at `localhost`. Set `OLLAMA_HOST=0.0.0.0` on the Windows
 side (`setx OLLAMA_HOST "0.0.0.0"`, then restart Ollama) and point the client at

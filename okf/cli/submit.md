@@ -17,7 +17,10 @@ timestamp: 2026-06-19T00:00:00Z
   generate vs chat vs embed.
 - **`hoglah pull`** — ensure a model is pulled into Ollama before submitting with
   `--real` (`--ollama-host` selects the server). Without `--real` the
-  [stub](../modules/adapters.md) does nothing.
+  [stub](../modules/adapters.md) does nothing. Accepts **Hugging Face** GGUF names
+  too — `hoglah pull --real "hf.co/<repo>:<quant>"` (Ollama pulls GGUF straight
+  from the Hub), so any HF GGUF model that fits the hardware is usable like a
+  native Ollama model.
 
 For programmatic submission, use the [client](../modules/client.md) `submit()` /
 `submit_embedding()`; to submit over a broker, the
