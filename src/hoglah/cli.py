@@ -282,8 +282,13 @@ def monitor(
 
     prev_completed: int | None = None
     prev_time: float | None = None
-    color = sys.stdout.isatty()
+    is_tty = sys.stdout.isatty()
+    # Live, top-style in-place redraw when on a terminal (unless --once/--no-clear,
+    # which print plainly so output is scrollable / pipeable).
+    live = is_tty and not once and not no_clear
     try:
+        if live:
+            sys.stdout.write("\033[2J\033[?25l")  # clear once + hide cursor
         while True:
             s = h.stats()
             jobs = h.list(limit=limit)
@@ -291,17 +296,29 @@ def monitor(
             elapsed = (now - prev_time) if prev_time is not None else None
             frame = _render_monitor_frame(
                 s, jobs, db_label=db_label, interval=interval,
-                prev_completed=prev_completed, elapsed=elapsed, color=color,
+                prev_completed=prev_completed, elapsed=elapsed, color=is_tty,
             )
-            if not once and not no_clear and color:
-                sys.stdout.write("\033[2J\033[H")  # clear + home
-            print(frame, flush=True)
+            if live:
+                # Home, redraw, then erase from the cursor to the end of the screen
+                # (clears any leftover lines from a longer previous frame). No
+                # trailing newline -> the terminal never scrolls, so it stays put
+                # like `top`.
+                sys.stdout.write("\033[H" + frame + "\033[0J")
+                sys.stdout.flush()
+            else:
+                print(frame, flush=True)
             prev_completed, prev_time = s["completed"], now
             if once:
                 break
             time.sleep(max(0.2, interval))
     except KeyboardInterrupt:
-        typer.secho("\nStopped.", fg=typer.colors.YELLOW)
+        pass
+    finally:
+        if live:
+            sys.stdout.write("\033[?25h\n")  # restore cursor
+            sys.stdout.flush()
+    if live:
+        typer.secho("Stopped.", fg=typer.colors.YELLOW)
 
 
 @app.command()
