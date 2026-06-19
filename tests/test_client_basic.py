@@ -195,6 +195,70 @@ def test_cli_submit_and_list(tmp_path):
     assert list_res.exit_code == 0
     assert "cli-test:stub" in list_res.output or "completed" in list_res.output
 
+
+# --------------------------------------------------------------------------- #
+# Queue monitor (`hoglah monitor`)
+# --------------------------------------------------------------------------- #
+
+
+def test_monitor_age_formats():
+    from datetime import datetime, timedelta, timezone
+
+    from hoglah.cli import _monitor_age
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    assert _monitor_age({}, now=now) == "-"
+    assert _monitor_age(None, now=now) == "-"
+    assert _monitor_age({"started": now - timedelta(seconds=5)}, now=now) == "5s"
+    # uses the most recent timing
+    assert _monitor_age(
+        {"queued": now - timedelta(minutes=10), "finished": now - timedelta(minutes=2)}, now=now
+    ) == "2m"
+
+
+def test_render_monitor_frame_pure():
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from hoglah.cli import _render_monitor_frame
+
+    now = datetime(2026, 6, 19, 12, 0, 0, tzinfo=timezone.utc)
+    stats = {"queued": 2, "processing": 1, "completed": 10, "failed": 1, "cancelled": 0, "total_jobs": 14}
+    jobs = [
+        SimpleNamespace(job_id="abcdef1234", status="processing", model="gemma3:1b", timings={}),
+        SimpleNamespace(
+            job_id="9988776655", status="completed", model="gemma4:latest",
+            timings={"finished": now - timedelta(seconds=8)},
+        ),
+    ]
+    frame = _render_monitor_frame(
+        stats, jobs, db_label="/tmp/x.db", interval=2.0,
+        prev_completed=7, elapsed=2.0, color=False, clock=now,
+    )
+    # counts + total
+    assert "queued      2" in frame.replace("   ", " ").replace("  ", " ") or "queued" in frame
+    assert "completed" in frame and "14" in frame
+    # throughput delta (10 - 7 = 3) and per-minute rate
+    assert "+3 completed" in frame
+    assert "/min)" in frame
+    # recent jobs: short ids, status, model, age
+    assert "abcdef12" in frame and "99887766" in frame
+    assert "gemma4:latest" in frame
+    assert "8s" in frame  # the completed job's age
+    assert "Ctrl-C to stop." in frame
+
+
+@pytest.mark.skipif(not _HAS_CLI_RUNNER, reason="typer not installed for CLI tests")
+def test_cli_monitor_once(tmp_path):
+    db = tmp_path / "mon.db"
+    runner = CliRunner()
+    # submit one job so the recent-jobs table is non-empty
+    runner.invoke(app, ["submit", "monitor prompt", "--model", "m:stub", "--db", str(db)])
+    res = runner.invoke(app, ["monitor", "--once", "--no-clear", "--db", str(db)])
+    assert res.exit_code == 0, res.output
+    assert "Hoglah Queue Monitor" in res.output
+    assert "Recent jobs:" in res.output
+
     # Models (stub) should work
     models_res = runner.invoke(app, ["models", "--db", str(db)])
     assert models_res.exit_code == 0

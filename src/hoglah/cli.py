@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +174,134 @@ def stats(
         print(f"{k:12} : {v}")
     print("-" * 30)
     print(f"{'total':12} : {s['total_jobs']}")
+
+
+_MONITOR_STATUS_COLORS = {
+    "queued": typer.colors.YELLOW,
+    "processing": typer.colors.CYAN,
+    "completed": typer.colors.GREEN,
+    "failed": typer.colors.RED,
+    "cancelled": typer.colors.BRIGHT_BLACK,
+}
+
+
+def _monitor_age(timings: dict[str, Any] | None, now: datetime | None = None) -> str:
+    """A short relative age from a job's most recent timing, e.g. '2s', '5m', '-'."""
+    times = [v for v in (timings or {}).values() if hasattr(v, "timestamp")]
+    if not times:
+        return "-"
+    latest = max(times)
+    ref = now or (datetime.now(latest.tzinfo) if getattr(latest, "tzinfo", None) else datetime.now())
+    try:
+        secs = max(0, int((ref - latest).total_seconds()))
+    except (TypeError, ValueError):
+        return "-"
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def _render_monitor_frame(
+    stats: dict[str, Any],
+    jobs: list[Any],
+    *,
+    db_label: str,
+    interval: float,
+    prev_completed: int | None = None,
+    elapsed: float | None = None,
+    color: bool = True,
+    clock: datetime | None = None,
+) -> str:
+    """Render one monitor frame as text (pure — no I/O — so it is unit-testable)."""
+
+    def paint(text: str, col: str) -> str:
+        return typer.style(text, fg=col) if color else text
+
+    q = stats.get("queued", 0)
+    p = stats.get("processing", 0)
+    comp = stats.get("completed", 0)
+    fail = stats.get("failed", 0)
+    canc = stats.get("cancelled", 0)
+    total = stats.get("total_jobs", q + p + comp + fail + canc)
+
+    stamp = (clock or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        f"Hoglah Queue Monitor    {stamp}",
+        f"db: {db_label}    refresh: {interval:g}s",
+        "",
+        f"  {paint(f'queued     {q:>5}', _MONITOR_STATUS_COLORS['queued'])}    "
+        f"{paint(f'completed  {comp:>5}', _MONITOR_STATUS_COLORS['completed'])}",
+        f"  {paint(f'processing {p:>5}', _MONITOR_STATUS_COLORS['processing'])}    "
+        f"{paint(f'failed     {fail:>5}', _MONITOR_STATUS_COLORS['failed'])}",
+        f"  {'total':<10} {total:>5}    "
+        f"{paint(f'cancelled  {canc:>5}', _MONITOR_STATUS_COLORS['cancelled'])}",
+    ]
+
+    if prev_completed is not None:
+        delta = comp - prev_completed
+        rate = f" (~{delta / elapsed * 60:.0f}/min)" if elapsed and elapsed > 0 else ""
+        lines.append(f"  throughput +{delta} completed since last refresh{rate}")
+
+    lines.append("")
+    lines.append("Recent jobs:")
+    if not jobs:
+        lines.append("  (none)")
+    else:
+        lines.append(f"  {'JOB_ID':<8}  {'STATUS':<11}  {'MODEL':<16}  AGE")
+        for j in jobs:
+            jid = (getattr(j, "job_id", "") or "")[:8]
+            status = j.status.value if hasattr(j.status, "value") else str(j.status)
+            model = (getattr(j, "model", None) or "?")[:16]
+            age = _monitor_age(getattr(j, "timings", None), now=clock)
+            status_cell = paint(f"{status:<11}", _MONITOR_STATUS_COLORS.get(status, typer.colors.WHITE))
+            lines.append(f"  {jid:<8}  {status_cell}  {model:<16}  {age}")
+
+    lines.append("")
+    lines.append("Ctrl-C to stop.")
+    return "\n".join(lines)
+
+
+@app.command()
+def monitor(
+    db: Path | None = typer.Option(None, "--db", help="Override database path"),
+    interval: float = typer.Option(2.0, "--interval", "-i", help="Refresh interval (seconds)"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Number of recent jobs to show"),
+    once: bool = typer.Option(False, "--once", help="Render a single frame and exit (no loop)"),
+    no_clear: bool = typer.Option(False, "--no-clear", help="Do not clear the screen between refreshes"),
+) -> None:
+    """Live queue monitor: status counts, throughput, and recent jobs, auto-refreshing."""
+    h = _get_hoglah(db)
+    try:
+        db_label = str(h.info().get("config", {}).get("db_path", db or "(default)"))
+    except Exception:
+        db_label = str(db or "(default)")
+
+    prev_completed: int | None = None
+    prev_time: float | None = None
+    color = sys.stdout.isatty()
+    try:
+        while True:
+            s = h.stats()
+            jobs = h.list(limit=limit)
+            now = time.monotonic()
+            elapsed = (now - prev_time) if prev_time is not None else None
+            frame = _render_monitor_frame(
+                s, jobs, db_label=db_label, interval=interval,
+                prev_completed=prev_completed, elapsed=elapsed, color=color,
+            )
+            if not once and not no_clear and color:
+                sys.stdout.write("\033[2J\033[H")  # clear + home
+            print(frame, flush=True)
+            prev_completed, prev_time = s["completed"], now
+            if once:
+                break
+            time.sleep(max(0.2, interval))
+    except KeyboardInterrupt:
+        typer.secho("\nStopped.", fg=typer.colors.YELLOW)
 
 
 @app.command()

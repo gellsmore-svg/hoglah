@@ -22,7 +22,8 @@ Read and tend the [store](../modules/storage.md):
 - **`clear`** / **`rm <job_id>`** — prune completed jobs / delete one.
 - **`doctor`** — environment + connectivity diagnostics.
 - **`models`** — list models known to the adapter (`--real` queries Ollama).
-
-> A live, auto-refreshing **queue monitor** (a watch view over `stats`/`list`) is
-> planned but not yet built — these are the current point-in-time inspection
-> commands.
+- **`monitor`** — a **live, auto-refreshing** view of the queue: status counts,
+  completion **throughput** (delta + per-minute rate), and the most recent jobs
+  (id, status, model, age). `--interval` / `-i` sets the refresh, `--limit` / `-l`
+  the recent-jobs count, `--once` renders a single frame, `--no-clear` keeps
+  scrollback. It is the watch view over `stats` + `list`.

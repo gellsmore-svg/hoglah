@@ -8,7 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- (none yet)
+- **`hoglah monitor`** — a live, auto-refreshing CLI queue monitor: status counts,
+  completion throughput (delta + per-minute rate), and the most recent jobs
+  (id, status, model, age). `--interval`/`-i`, `--limit`/`-l`, `--once`, `--no-clear`.
+- **Submitter-side messaging client** (`messaging_submitter.py`) — `MessagingSubmitter`
+  over a `SubmitterTransport` (Kafka/RabbitMQ/Redis), the mirror of the worker
+  bridge: publish a job request and await the result by `correlation_id`, reusing
+  the bridge's wire formats.
+- **OKF knowledge bundle** under `okf/` (Open Knowledge Format).
 
 ## [0.7.0] - 2026-06-15
 

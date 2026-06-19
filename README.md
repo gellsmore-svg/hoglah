@@ -29,7 +29,8 @@ multiple workers and machines when you point it at a shared backend.
   **RabbitMQ**, or **Redis Streams**, all crash-safe.
 - **Safe by default** — ships with a deterministic stub adapter; real Ollama
   inference is explicitly opt-in.
-- **Rich CLI** — submit, inspect, wait, prune, diagnose, and run a worker.
+- **Rich CLI** — submit, inspect, wait, prune, diagnose, run a worker, and a live
+  `monitor` (auto-refreshing status counts, throughput, and recent jobs).
 
 ## Installation
 
