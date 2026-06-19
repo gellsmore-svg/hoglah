@@ -248,6 +248,34 @@ def test_render_monitor_frame_pure():
     assert "Ctrl-C to stop." in frame
 
 
+def test_monitor_jobs_active_first_and_status_filter():
+    from types import SimpleNamespace
+
+    from hoglah.cli import _monitor_jobs
+    from hoglah.models import JobStatus
+
+    jobs = [
+        SimpleNamespace(job_id="c1", status=JobStatus.COMPLETED),
+        SimpleNamespace(job_id="p1", status=JobStatus.PROCESSING),
+        SimpleNamespace(job_id="q1", status=JobStatus.QUEUED),
+        SimpleNamespace(job_id="c2", status=JobStatus.COMPLETED),
+    ]
+
+    class _FakeH:
+        def list(self, status=None, limit=20):
+            items = [j for j in jobs if status is None or j.status == status]
+            return items[:limit]
+
+    h = _FakeH()
+    # default: active jobs first (processing, then queued), then recent others, deduped
+    out = _monitor_jobs(h, limit=10, status=None)
+    assert [j.job_id for j in out][:2] == ["p1", "q1"]
+    assert sorted(j.job_id for j in out) == ["c1", "c2", "p1", "q1"]  # no duplicates
+    # --status filters to just that status
+    only = _monitor_jobs(h, limit=10, status=JobStatus.COMPLETED)
+    assert [j.job_id for j in only] == ["c1", "c2"]
+
+
 @pytest.mark.skipif(not _HAS_CLI_RUNNER, reason="typer not installed for CLI tests")
 def test_cli_monitor_once(tmp_path):
     db = tmp_path / "mon.db"

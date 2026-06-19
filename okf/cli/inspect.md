@@ -22,8 +22,10 @@ Read and tend the [store](../modules/storage.md):
 - **`clear`** / **`rm <job_id>`** — prune completed jobs / delete one.
 - **`doctor`** — environment + connectivity diagnostics.
 - **`models`** — list models known to the adapter (`--real` queries Ollama).
-- **`monitor`** — a **live, auto-refreshing** view of the queue: status counts,
-  completion **throughput** (delta + per-minute rate), and the most recent jobs
-  (id, status, model, age). `--interval` / `-i` sets the refresh, `--limit` / `-l`
-  the recent-jobs count, `--once` renders a single frame, `--no-clear` keeps
-  scrollback. It is the watch view over `stats` + `list`.
+- **`monitor`** — a **live, `top`-style** view of the queue (redraws in place):
+  status counts, completion **throughput** (delta + per-minute rate), and a job
+  list (id, status, model, age). By default the list **foregrounds active jobs**
+  (processing, then queued) before recent others; `--status`/`-s` filters to one
+  status. `--interval`/`-i` sets the refresh, `--limit`/`-l` the row count,
+  `--once` renders a single frame, `--no-clear` prints plainly (scrollable/pipeable).
+  It is the watch view over `stats` + `list`.

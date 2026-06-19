@@ -265,15 +265,39 @@ def _render_monitor_frame(
     return "\n".join(lines)
 
 
+def _monitor_jobs(h: Any, limit: int, status: JobStatus | None) -> list[Any]:
+    """Jobs for the monitor. With --status, just that status. Otherwise active
+    jobs first (processing, then queued) so a live monitor foregrounds what is in
+    flight, then the most recent others fill the remaining rows."""
+    if status is not None:
+        return h.list(status=status, limit=limit)
+    active = h.list(status=JobStatus.PROCESSING, limit=limit) + h.list(status=JobStatus.QUEUED, limit=limit)
+    ordered: list[Any] = []
+    seen: set[str] = set()
+    for j in active + h.list(limit=limit):
+        if j.job_id not in seen:
+            seen.add(j.job_id)
+            ordered.append(j)
+    return ordered[:limit]
+
+
 @app.command()
 def monitor(
     db: Path | None = typer.Option(None, "--db", help="Override database path"),
     interval: float = typer.Option(2.0, "--interval", "-i", help="Refresh interval (seconds)"),
-    limit: int = typer.Option(10, "--limit", "-l", help="Number of recent jobs to show"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Number of jobs to show"),
+    status: str | None = typer.Option(
+        None, "--status", "-s", help="Only show jobs with this status (e.g. processing, queued)."
+    ),
     once: bool = typer.Option(False, "--once", help="Render a single frame and exit (no loop)"),
     no_clear: bool = typer.Option(False, "--no-clear", help="Do not clear the screen between refreshes"),
 ) -> None:
-    """Live queue monitor: status counts, throughput, and recent jobs, auto-refreshing."""
+    """Live queue monitor: status counts, throughput, and jobs, auto-refreshing.
+
+    By default the job list foregrounds active jobs (processing, then queued),
+    then recent others; pass --status to filter to a single status.
+    """
+    status_filter = JobStatus(status) if status else None
     h = _get_hoglah(db)
     try:
         db_label = str(h.info().get("config", {}).get("db_path", db or "(default)"))
@@ -291,7 +315,7 @@ def monitor(
             sys.stdout.write("\033[2J\033[?25l")  # clear once + hide cursor
         while True:
             s = h.stats()
-            jobs = h.list(limit=limit)
+            jobs = _monitor_jobs(h, limit, status_filter)
             now = time.monotonic()
             elapsed = (now - prev_time) if prev_time is not None else None
             frame = _render_monitor_frame(
@@ -299,11 +323,13 @@ def monitor(
                 prev_completed=prev_completed, elapsed=elapsed, color=is_tty,
             )
             if live:
-                # Home, redraw, then erase from the cursor to the end of the screen
-                # (clears any leftover lines from a longer previous frame). No
-                # trailing newline -> the terminal never scrolls, so it stays put
-                # like `top`.
-                sys.stdout.write("\033[H" + frame + "\033[0J")
+                # Top-style redraw: home, then write each line followed by erase-to-
+                # end-of-LINE (\033[K) so leftover characters from a longer previous
+                # frame are wiped; finally erase-to-end-of-SCREEN (\033[0J) for any
+                # extra lines below. No trailing newline -> the terminal never
+                # scrolls, so the display stays put like `top`.
+                body = "\n".join(f"{ln}\033[K" for ln in frame.split("\n"))
+                sys.stdout.write("\033[H" + body + "\033[0J")
                 sys.stdout.flush()
             else:
                 print(frame, flush=True)
