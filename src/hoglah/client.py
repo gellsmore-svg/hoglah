@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
+from .dispatch import BackendPool
 from .config import HoglahConfig, HoglahSettings
 from .models import (
     JobCallback,
@@ -156,10 +157,19 @@ class Hoglah:
         #   1. Explicit adapter= passed in
         #   2. use_real=True kwarg (or HOGLAH_USE_REAL_ADAPTER env)
         #   3. Safe default: StubAdapter (no network, works everywhere)
+        # Multi-backend dispatch: when ollama_hosts lists several servers (and we're
+        # building the real adapter), the worker fans jobs across them least-loaded.
+        # Hoglah stays the single front end; callers are unchanged.
+        self._pool: BackendPool | None = None
         if adapter is None:
             env_wants_real = os.environ.get("HOGLAH_USE_REAL_ADAPTER", "").lower() in ("1", "true", "yes", "on")
             if use_real or env_wants_real:
-                adapter = OllamaAdapter(host=self.config.ollama_host)
+                hosts = list(self.config.ollama_hosts)
+                if hosts:
+                    self._pool = BackendPool([OllamaAdapter(host=h) for h in hosts])
+                    adapter = self._pool._adapters[0]  # admin ops (pull/show) use the first
+                else:
+                    adapter = OllamaAdapter(host=self.config.ollama_host)
             else:
                 adapter = StubAdapter()
         self.adapter: BaseAdapter = adapter
@@ -749,10 +759,15 @@ class Hoglah:
         )
 
     async def _dispatch(self, req: JobRequest) -> tuple[Any, dict[str, int], dict[str, Any]]:
-        """Route a request to the adapter by kind: embeddings to embed(),
-        everything else to run(). Both return (payload, usage, metadata) where
-        payload is a vector for embeddings or output text for generation."""
-        if getattr(req, "kind", "generate") == "embed":
+        """Route a request to an adapter by kind: embeddings to embed(), everything
+        else to run(). With multiple backends, lease the least-loaded one for this
+        job; otherwise use the single configured adapter. Both return
+        (payload, usage, metadata)."""
+        is_embed = getattr(req, "kind", "generate") == "embed"
+        if self._pool is not None and len(self._pool) > 1:
+            async with self._pool.lease() as adapter:
+                return await (adapter.embed(req) if is_embed else adapter.run(req))
+        if is_embed:
             return await self.adapter.embed(req)
         return await self._call_ollama(req)
 

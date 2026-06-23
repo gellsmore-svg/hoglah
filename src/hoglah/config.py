@@ -171,6 +171,13 @@ class HoglahSettings(BaseSettings):
         default=None,
         description="Ollama server URL. If None, the official ollama client defaults are used (usually http://localhost:11434).",
     )
+    # Multi-backend dispatch: several Ollama servers the one worker spreads jobs
+    # across (least-loaded). Empty = single backend (`ollama_host`). Hoglah remains
+    # the single front end; callers are unchanged. Env: HOGLAH_OLLAMA_HOSTS=h1,h2.
+    ollama_hosts: list[str] = Field(
+        default_factory=list,
+        description="Multiple Ollama server URLs to fan jobs across (least-loaded). Comma-separated via env. Empty falls back to ollama_host.",
+    )
 
     # Result delivery — output folder (ADR-014). When set, the worker writes
     # each terminal job's full result to `<output_dir>/<job_id>.json` so a
@@ -214,6 +221,14 @@ class HoglahSettings(BaseSettings):
             return Path(v).expanduser()
         return v
 
+    @field_validator("ollama_hosts", mode="before")
+    @classmethod
+    def _split_ollama_hosts(cls, v: Any) -> Any:
+        # Accept a comma-separated string from the environment (HOGLAH_OLLAMA_HOSTS).
+        if isinstance(v, str):
+            return [h.strip() for h in v.split(",") if h.strip()]
+        return v
+
     def ensure_dirs(self) -> None:
         """Create parent directory for db_path (and output_dir if set)."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -233,6 +248,7 @@ class HoglahSettings(BaseSettings):
             "backend": self.backend,
             "concurrency": self.concurrency,
             "ollama_host": self.ollama_host,
+            "ollama_hosts": list(self.ollama_hosts),
             "output_dir": str(self.output_dir) if self.output_dir else None,
             "log_level": self.log_level,
             "kafka_enabled": self.kafka_enabled,

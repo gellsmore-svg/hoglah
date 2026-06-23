@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Multi-backend dispatch** — one worker can fan its in-flight jobs across several
+  Ollama servers (e.g. two GPUs, or a local box + a remote one) instead of a single
+  host. Configure `ollama_hosts` (or `hoglah run --ollama-hosts h1,h2`, or
+  `HOGLAH_OLLAMA_HOSTS=h1,h2`); each job goes to the **least-loaded** backend. Hoglah
+  stays the single front end — callers are unchanged. Empty falls back to
+  `ollama_host`. (Per-model affinity is a future refinement; v1 balances by load.)
 - **`hoglah monitor`** — a live, auto-refreshing CLI queue monitor: status counts,
   completion throughput (delta + per-minute rate), and the most recent jobs
   (id, status, model, age). `--interval`/`-i`, `--limit`/`-l`, `--once`, `--no-clear`.

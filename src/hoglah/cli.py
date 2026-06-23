@@ -689,6 +689,10 @@ def run(
     db: Path | None = typer.Option(None, "--db"),
     real: bool = typer.Option(False, "--real", help="Use the real Ollama adapter"),
     ollama_host: str | None = typer.Option(None, "--ollama-host"),
+    ollama_hosts: str | None = typer.Option(
+        None, "--ollama-hosts",
+        help="Comma-separated Ollama servers to fan jobs across, least-loaded (e.g. http://gpu1:11434,http://gpu2:11434).",
+    ),
     concurrency: int | None = typer.Option(None, "--concurrency", "-c"),
 ) -> None:
     """Run the background worker in the foreground (blocks until interrupted).
@@ -702,6 +706,8 @@ def run(
         cfg["concurrency"] = concurrency
     if ollama_host:
         cfg["ollama_host"] = ollama_host
+    if ollama_hosts:
+        cfg["ollama_hosts"] = [h.strip() for h in ollama_hosts.split(",") if h.strip()]
 
     h = Hoglah(config=cfg, use_real=real)
 
