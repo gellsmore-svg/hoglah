@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-24
+
 ### Added
 - **Multi-backend dispatch** — one worker can fan its in-flight jobs across several
   Ollama servers (e.g. two GPUs, or a local box + a remote one) instead of a single
