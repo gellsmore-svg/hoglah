@@ -11,9 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-backend dispatch** — one worker can fan its in-flight jobs across several
   Ollama servers (e.g. two GPUs, or a local box + a remote one) instead of a single
   host. Configure `ollama_hosts` (or `hoglah run --ollama-hosts h1,h2`, or
-  `HOGLAH_OLLAMA_HOSTS=h1,h2`); each job goes to the **least-loaded** backend. Hoglah
-  stays the single front end — callers are unchanged. Empty falls back to
-  `ollama_host`. (Per-model affinity is a future refinement; v1 balances by load.)
+  `HOGLAH_OLLAMA_HOSTS=h1,h2`). Dispatch is **warm-affinity, then least-loaded**: a
+  job for model M prefers a backend that *recently ran M* (likely still loaded —
+  avoids a multi-GB reload), and among those (or all, if none is warm for M) picks
+  the fewest-in-flight backend to balance. Warmth is tracked cheaply by recency, with
+  no extra calls to Ollama, and degrades to a reload if a model was actually evicted.
+  Hoglah stays the single front end — callers are unchanged. Empty falls back to
+  `ollama_host`.
+- **`Hoglah.available_models()`** — the deduped, sorted union of model names across
+  all backends, so a caller (e.g. an agent choosing a model) can ask Hoglah what's
+  available without knowing the topology. Unreachable backends contribute nothing
+  rather than failing the call; with one backend it lists that backend's models.
 - **`hoglah monitor`** — a live, auto-refreshing CLI queue monitor: status counts,
   completion throughput (delta + per-minute rate), and the most recent jobs
   (id, status, model, age). `--interval`/`-i`, `--limit`/`-l`, `--once`, `--no-clear`.

@@ -765,7 +765,7 @@ class Hoglah:
         (payload, usage, metadata)."""
         is_embed = getattr(req, "kind", "generate") == "embed"
         if self._pool is not None and len(self._pool) > 1:
-            async with self._pool.lease() as adapter:
+            async with self._pool.lease(getattr(req, "model", None)) as adapter:
                 return await (adapter.embed(req) if is_embed else adapter.run(req))
         if is_embed:
             return await self.adapter.embed(req)
@@ -980,6 +980,25 @@ class Hoglah:
         Callable from sync code or from within a running event loop.
         """
         return _run_async(lambda: self.adapter.show_model(model))
+
+    def available_models(self) -> list[str]:
+        """The deduped, sorted list of model names available across ALL backends.
+
+        A caller (e.g. an LLM agent choosing a model) asks Hoglah this rather than
+        knowing the topology: with multiple backends it returns the superset union;
+        with one backend it lists that backend's models. Unreachable backends simply
+        contribute nothing. Callable from sync code or within a running event loop.
+        """
+        if self._pool is not None and len(self._pool) > 1:
+            return _run_async(self._pool.available_models)
+
+        async def _single() -> list[str]:
+            from .dispatch import _model_name
+
+            entries = await self.adapter.list_models()
+            return sorted({n for n in (_model_name(e) for e in (entries or [])) if n})
+
+        return _run_async(_single)
 
     def __enter__(self) -> "Hoglah":
         """Support `with Hoglah(...) as h:` for automatic cleanup."""
