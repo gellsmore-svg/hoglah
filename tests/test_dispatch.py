@@ -90,6 +90,22 @@ def test_warm_affinity_routes_a_model_back_to_its_backend():
     asyncio.run(scenario())
 
 
+def test_failed_backend_is_avoided_on_retry_for_same_model():
+    pool = BackendPool([_FakeAdapter("bad"), _FakeAdapter("good")])
+
+    async def scenario():
+        with pytest.raises(ConnectionError):
+            async with pool.lease("model-x") as first:
+                assert first.host == "bad"
+                raise ConnectionError("backend failed")
+        assert pool.warm() == [[], []]
+        async with pool.lease("model-x") as retry:
+            assert retry.host == "good"
+        assert pool.warm() == [[], ["model-x"]]
+
+    asyncio.run(scenario())
+
+
 def test_unwarm_model_falls_back_to_least_loaded():
     pool = BackendPool([_FakeAdapter("a"), _FakeAdapter("b")])
 

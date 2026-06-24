@@ -21,6 +21,7 @@ asyncio event loop, so the counters/recency need no locking.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from typing import Any
@@ -43,6 +44,9 @@ class BackendPool:
         # Per-backend recency of served models (most-recent first); approximates which
         # models are still warm. maxlen ~ how many models a backend keeps loaded.
         self._recent: list[deque[str]] = [deque(maxlen=max(1, warm_capacity)) for _ in self._adapters]
+        # Short per-model failure cooldown. Immediate retries avoid a backend that
+        # just failed, but recovered backends automatically re-enter after 30 seconds.
+        self._failed_until: dict[tuple[str, int], float] = {}
 
     def __len__(self) -> int:
         return len(self._adapters)
@@ -65,9 +69,19 @@ class BackendPool:
         d.appendleft(model)  # maxlen evicts the oldest (rightmost)
 
     def _pick(self, model: str | None) -> int:
-        warm = [i for i in range(len(self._adapters)) if model and model in self._recent[i]]
-        candidates = warm or list(range(len(self._adapters)))
-        return min(candidates, key=lambda i: (self._inflight[i], i))
+        available = list(range(len(self._adapters)))
+        if model:
+            now = time.monotonic()
+            candidates = [
+                i for i in available
+                if self._failed_until.get((model, i), 0.0) <= now
+            ]
+            if not candidates:
+                candidates = available
+        else:
+            candidates = available
+        warm = [i for i in candidates if model and model in self._recent[i]]
+        return min(warm or candidates, key=lambda i: (self._inflight[i], i))
 
     @asynccontextmanager
     async def lease(self, model: str | None = None):
@@ -75,10 +89,16 @@ class BackendPool:
         least loaded. Counts the job in-flight and records the model as warm there."""
         idx = self._pick(model)
         self._inflight[idx] += 1
-        if model:
-            self._note(idx, model)
         try:
             yield self._adapters[idx]
+        except Exception:
+            if model:
+                self._failed_until[(model, idx)] = time.monotonic() + 30.0
+            raise
+        else:
+            if model:
+                self._failed_until.pop((model, idx), None)
+                self._note(idx, model)
         finally:
             self._inflight[idx] -= 1
 
