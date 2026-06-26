@@ -35,6 +35,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "keturah>=0.1",  # LLM-interface manifest (build_manifest / to_mcp)
     "pydantic>=2.7",
     "pydantic-settings>=2.0",
     "ollama>=0.3",  # official ollama python client
