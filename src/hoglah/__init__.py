@@ -11,6 +11,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
 from .client import Hoglah, HoglahConfig
 from .models import JobResult, JobStatus, JobRequest
+from .priority_queue import SessionPriorityQueue
 
 # Single source of truth is pyproject.toml; read it from the installed
 # package metadata so __version__ can never drift from the wheel again.
@@ -28,6 +29,7 @@ __all__ = [
     "JobResult",
     "JobStatus",
     "JobRequest",
+    "SessionPriorityQueue",
     "OllamaAdapter",
     "StubAdapter",
 ]
