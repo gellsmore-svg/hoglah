@@ -348,6 +348,30 @@ def monitor(
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (keep local; no auth)"),
+    port: int = typer.Option(8781, "--port", "-p", help="Port for the web monitor"),
+    db: Path | None = typer.Option(None, "--db", help="Override database path"),
+) -> None:
+    """Serve the read-only web queue monitor (browser twin of `monitor`).
+
+    Requires the web extra: pip install hoglah[web].
+    """
+    try:
+        import uvicorn
+
+        from .web import create_app
+    except ImportError as exc:
+        typer.secho(
+            f"Web monitor needs the 'web' extra ({exc}). Install with: pip install hoglah[web]",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    typer.echo(f"Hoglah web monitor on http://{host}:{port}")
+    uvicorn.run(create_app(db_path=db), host=host, port=port, log_level="warning")
+
+
+@app.command()
 def info(
     db: Path | None = typer.Option(None, "--db", help="Override database path"),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of human text"),

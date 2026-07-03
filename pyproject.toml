@@ -63,6 +63,10 @@ rabbitmq = [
 redis = [
     "redis>=5.0",  # Redis Streams bridge (redis_enabled=True, ADR-020)
 ]
+web = [
+    "fastapi>=0.110",  # read-only queue monitor (hoglah serve)
+    "uvicorn>=0.29",
+]
 
 [project.scripts]
 hoglah = "hoglah.cli:main"  # typer app via wrapper
