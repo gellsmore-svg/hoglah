@@ -206,6 +206,24 @@ class HoglahSettings(BaseSettings):
         description="Logging level for the 'hoglah' logger (DEBUG, INFO, WARNING, ERROR, CRITICAL).",
     )
 
+    # Galeed trace emission — witness the job lifecycle on the family trace
+    # spine (queued/started/completed/failed/cancelled). Off by default;
+    # needs `pip install galeed` (and pymongo for persistence). Best-effort:
+    # tracing failures never affect the queue.
+    galeed_enabled: bool = Field(
+        default=False,
+        description="Emit job-lifecycle events to the Galeed family trace spine. Off by default.",
+    )
+    galeed_mongo_uri: str = Field(
+        default="mongodb://localhost:27017",
+        description="MongoDB URI for persisted Galeed trace events.",
+    )
+    galeed_mongo_db: str = Field(
+        default="mnemosyne_dev",
+        description="MongoDB database holding the family trace_events collection "
+        "(the one the trace API / Mizpah reads).",
+    )
+
     @field_validator("db_path", mode="before")
     @classmethod
     def _expand_db_path(cls, v: Any) -> Path:

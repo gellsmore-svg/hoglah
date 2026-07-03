@@ -42,6 +42,14 @@ from .models import (
     normalize_request,
 )
 from .store import JobStore, create_sqlite_store
+from .tracing import (
+    JOB_CANCELLED,
+    JOB_COMPLETED,
+    JOB_FAILED,
+    JOB_QUEUED,
+    JOB_STARTED,
+    JobWitness,
+)
 
 logger = logging.getLogger("hoglah")
 
@@ -152,6 +160,9 @@ class Hoglah:
             )
         else:
             self._store = create_sqlite_store(self.config.db_path)
+
+        # Galeed spine witness (no-op unless config.galeed_enabled).
+        self._witness = JobWitness(self.config)
 
         # Execution adapter selection (priority order):
         #   1. Explicit adapter= passed in
@@ -322,6 +333,16 @@ class Hoglah:
 
         # Enqueue (store the request)
         job_id = self._store.enqueue(req, callback_key=callback_key)
+        self._witness.emit(
+            JOB_QUEUED,
+            job_id=job_id,
+            summary=f"queued {kind} job for {model}",
+            session_id=(metadata or {}).get("session_id"),
+            model=model,
+            kind=kind,
+            tags=tags or [],
+            parent_job_id=parent_job_id,
+        )
 
         # Remember direct callback for this process (if any)
         if direct_cb is not None:
@@ -464,6 +485,14 @@ class Hoglah:
             error="Cancelled by user",
         )
         self._store.set_result(job_id, result)
+        self._witness.emit(
+            JOB_CANCELLED,
+            job_id=job_id,
+            status="completed",
+            summary="job cancelled by user",
+            session_id=(row.get("request", {}).get("metadata") or {}).get("session_id"),
+            model=row.get("request", {}).get("model"),
+        )
         self._deliver(result)
 
         # If the job is executing in our worker, interrupt it on the worker's
@@ -622,6 +651,16 @@ class Hoglah:
             request = JobRequest(**row.get("request", {}))
             callback_key = row.get("callback_key")
 
+            self._witness.emit(
+                JOB_STARTED,
+                job_id=job_id,
+                status="started",
+                summary=f"started {request.kind} job for {request.model}",
+                session_id=(request.metadata or {}).get("session_id"),
+                model=request.model,
+                kind=request.kind,
+            )
+
             # Execute with retries
             result = await self._execute_with_retries(job_id, request)
 
@@ -634,6 +673,23 @@ class Hoglah:
 
             # Persist final result
             self._store.set_result(job_id, result)
+
+            failed = result.status == JobStatus.FAILED
+            self._witness.emit(
+                JOB_FAILED if failed else JOB_COMPLETED,
+                job_id=job_id,
+                status="failed" if failed else "completed",
+                summary=(
+                    f"job failed: {(result.error or 'unknown error')[:120]}"
+                    if failed
+                    else f"completed {request.kind} job for {request.model}"
+                ),
+                session_id=(request.metadata or {}).get("session_id"),
+                model=request.model,
+                kind=request.kind,
+                usage=result.usage or {},
+                truncated=result.truncated,
+            )
 
             # Out-of-band delivery for decoupled submitters (output file; H3 callback)
             self._deliver(result, request)
@@ -662,6 +718,12 @@ class Hoglah:
                     model=getattr(request, "model", None) if "request" in locals() else None,
                 )
                 self._store.set_result(job_id, err_result)
+                self._witness.emit(
+                    JOB_FAILED,
+                    job_id=job_id,
+                    status="failed",
+                    summary="job failed: unexpected worker error",
+                )
                 self._deliver(err_result, request if "request" in locals() else None)
             except Exception:
                 pass

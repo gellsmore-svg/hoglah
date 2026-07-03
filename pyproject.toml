@@ -67,6 +67,10 @@ web = [
     "fastapi>=0.110",  # read-only queue monitor (hoglah serve)
     "uvicorn>=0.29",
 ]
+galeed = [
+    "galeed>=0.1",   # family trace spine: job-lifecycle events (galeed_enabled=True)
+    "pymongo>=4.6",  # persistence into the shared trace_events collection
+]
 
 [project.scripts]
 hoglah = "hoglah.cli:main"  # typer app via wrapper
