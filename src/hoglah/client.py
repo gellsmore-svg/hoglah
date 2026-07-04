@@ -270,6 +270,7 @@ class Hoglah:
         max_retries: int = 2,
         metadata: dict[str, Any] | None = None,
         parent_job_id: str | None = None,
+        step_name: str | None = None,  # human label for the LLM debugging view
         # Generation params
         temperature: float | None = None,
         top_p: float | None = None,
@@ -290,6 +291,11 @@ class Hoglah:
         """
         if not model:
             raise ValueError("model is required")
+
+        # A step name is metadata (no schema change): the debugging view and
+        # older persisted requests both read it from there.
+        if step_name:
+            metadata = {**(metadata or {}), "step_name": step_name}
 
         # Handle callback (direct callable vs named key)
         callback_key: str | None = None
@@ -690,6 +696,7 @@ class Hoglah:
                 usage=result.usage or {},
                 truncated=result.truncated,
             )
+            self._witness.record_io(job_id=job_id, request=request, result=result)
 
             # Out-of-band delivery for decoupled submitters (output file; H3 callback)
             self._deliver(result, request)

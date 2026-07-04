@@ -20,6 +20,7 @@ at the database the family's trace API (Tirzah ``/api/trace``, Mizpah) reads.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 logger = logging.getLogger("hoglah")
@@ -40,30 +41,39 @@ class JobWitness:
 
     def __init__(self, config: Any, db: Any = None) -> None:
         self._enabled = bool(getattr(config, "galeed_enabled", False))
+        self._capture_io = bool(getattr(config, "galeed_capture_io", True))
         self._config = config
         self._db = db
         self._db_resolved = db is not None
+        self._db_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
     def _database(self) -> Any:
-        """Lazily open the shared trace database (None → bus-only emission)."""
-        if self._db_resolved:
-            return self._db
-        self._db_resolved = True
-        try:
-            from pymongo import MongoClient
+        """Lazily open the shared trace database (None → bus-only emission).
 
-            client = MongoClient(
-                self._config.galeed_mongo_uri, serverSelectionTimeoutMS=2000
-            )
-            self._db = client[self._config.galeed_mongo_db]
-        except Exception:
-            logger.debug("galeed trace db unavailable; emitting bus-only", exc_info=True)
-            self._db = None
-        return self._db
+        Locked, and the resolved flag flips only AFTER the handle is assigned:
+        the submitter (main thread) and the worker (event-loop thread) can both
+        hit the first emission within milliseconds, and an unlocked check-then-
+        act here made the worker read a half-initialised None and silently drop
+        its events."""
+        with self._db_lock:
+            if self._db_resolved:
+                return self._db
+            try:
+                from pymongo import MongoClient
+
+                client = MongoClient(
+                    self._config.galeed_mongo_uri, serverSelectionTimeoutMS=2000
+                )
+                self._db = client[self._config.galeed_mongo_db]
+            except Exception:
+                logger.debug("galeed trace db unavailable; emitting bus-only", exc_info=True)
+                self._db = None
+            self._db_resolved = True
+            return self._db
 
     def emit(
         self,
@@ -101,3 +111,56 @@ class JobWitness:
             )
         except Exception:
             logger.debug("galeed emit failed (ignored)", exc_info=True)
+
+    def record_io(self, *, job_id: str, request: Any, result: Any) -> None:
+        """Record the job's FULL input/output into galeed's llm_calls (the family
+        LLM debugging view). One document per executed job:
+
+        - call_id = job_id; parent_call_id = parent_job_id (so Python-augmented
+          chains render as a tree);
+        - trace_id = request.metadata["trace_id"] when the caller threads one
+          through (linking every call of a multi-step flow into one trace),
+          else the job_id;
+        - technical detail (params, usage, truncation) rides in metadata, which
+          viewers only show in advanced mode.
+
+        Best-effort like everything else here; embedding jobs are skipped
+        (vectors are not debugging reading material).
+        """
+        if not (self._enabled and self._capture_io):
+            return
+        if getattr(request, "kind", "generate") == "embed":
+            return
+        try:
+            from galeed import record_llm_call
+        except ImportError:
+            return
+        try:
+            request_meta = dict(getattr(request, "metadata", None) or {})
+            detail = {
+                "kind": getattr(request, "kind", None),
+                "tags": getattr(request, "tags", None) or [],
+                "system_prompt": getattr(request, "system_prompt", None),
+                "usage": getattr(result, "usage", None) or {},
+                "truncated": getattr(result, "truncated", False),
+                "num_ctx": getattr(request, "num_ctx", None),
+                "job_id": job_id,
+            }
+            record_llm_call(
+                self._database(),
+                call_id=job_id,
+                trace_id=request_meta.get("trace_id") or job_id,
+                session_id=request_meta.get("session_id") or "hoglah",
+                source="hoglah",
+                step_name=request_meta.get("step_name"),
+                parent_call_id=getattr(request, "parent_job_id", None),
+                model=getattr(request, "model", None),
+                prompt=getattr(request, "prompt", None),
+                messages=getattr(request, "messages", None),
+                output=getattr(result, "output", None),
+                error=getattr(result, "error", None),
+                metadata=detail,
+                emit_event=False,  # the job.* lifecycle events already mark the spine
+            )
+        except Exception:
+            logger.debug("galeed llm_calls record failed (ignored)", exc_info=True)

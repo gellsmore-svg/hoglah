@@ -17,7 +17,7 @@ def seeded_db(tmp_path):
     """A store with two completed stub jobs (worker runs them synchronously fast)."""
     db_path = tmp_path / "queue.db"
     h = Hoglah(config={"db_path": db_path})
-    first = h.submit(prompt="hello world", model="stub:1")
+    first = h.submit(prompt="hello world", model="stub:1", step_name="greet")
     second = h.submit(prompt="second job", model="stub:2", tags=["batch"])
     h.wait(first, timeout=30)
     h.wait(second, timeout=30)
@@ -57,6 +57,22 @@ def test_api_job_and_detail_page(client) -> None:
     page = client.get(f"/jobs/{job_id}")
     assert page.status_code == 200
     assert job_id[:8] in page.text
+
+
+def test_detail_page_shows_full_input_step_and_trace_hint(client) -> None:
+    """The queue detail doubles as a debug view: full In→Out + step + galeed link."""
+    calls = client.get("/api/summary").json()["jobs"]
+    greet = next(j for j in calls if j.get("step_name") == "greet")
+    page = client.get(f"/jobs/{greet['job_id']}").text
+    assert "hello world" in page          # full input
+    assert "greet" in page                # step row
+    assert "galeed trace --call" in page  # cross-family pointer
+
+
+def test_dashboard_has_step_column(client) -> None:
+    page = client.get("/").text
+    assert "<th>Step</th>" in page
+    assert "greet" in page
 
 
 def test_missing_job_is_404(client) -> None:

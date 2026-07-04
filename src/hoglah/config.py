@@ -223,6 +223,12 @@ class HoglahSettings(BaseSettings):
         description="MongoDB database holding the family trace_events collection "
         "(the one the trace API / Mizpah reads).",
     )
+    galeed_capture_io: bool = Field(
+        default=True,
+        description="With galeed_enabled: also record each job's FULL prompt/messages "
+        "and output into the llm_calls collection (the family LLM debugging view). "
+        "Turn off to keep lifecycle events but not payloads.",
+    )
 
     @field_validator("db_path", mode="before")
     @classmethod

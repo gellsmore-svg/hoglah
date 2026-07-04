@@ -124,24 +124,29 @@ def list_jobs(
         print(json.dumps(data, indent=2, default=str))
         return
 
-    # Simple aligned output (no extra dependencies)
-    # Include PARENT column if any jobs have a parent (for chaining visibility)
+    # Simple aligned output (no extra dependencies). Optional columns appear
+    # only when some job uses them (PARENT for chains, STEP for debug labels).
     has_parent = any(j.parent_job_id for j in jobs)
+    has_step = any((j.metadata or {}).get("step_name") for j in jobs)
+    header = f"{'JOB_ID':<38}  {'STATUS':<12}  {'MODEL':<18}"
+    if has_step:
+        header += f"  {'STEP':<18}"
     if has_parent:
-        print(f"{'JOB_ID':<38}  {'STATUS':<12}  {'MODEL':<18}  {'PARENT':<12}  TAGS")
-        print("-" * 92)
-        for j in jobs:
-            model = (j.model or "?")[:18]
-            parent = (j.parent_job_id or "")[:12] if j.parent_job_id else "-"
-            tags = ",".join(j.tags) if j.tags else "-"
-            print(f"{j.job_id:<38}  {j.status.value:<12}  {model:<18}  {parent:<12}  {tags}")
-    else:
-        print(f"{'JOB_ID':<38}  {'STATUS':<12}  {'MODEL':<18}  TAGS")
-        print("-" * 80)
-        for j in jobs:
-            model = (j.model or "?")[:18]
-            tags = ",".join(j.tags) if j.tags else "-"
-            print(f"{j.job_id:<38}  {j.status.value:<12}  {model:<18}  {tags}")
+        header += f"  {'PARENT':<12}"
+    header += "  TAGS"
+    print(header)
+    print("-" * len(header))
+    for j in jobs:
+        model = (j.model or "?")[:18]
+        line = f"{j.job_id:<38}  {j.status.value:<12}  {model:<18}"
+        if has_step:
+            step = ((j.metadata or {}).get("step_name") or "-")[:18]
+            line += f"  {step:<18}"
+        if has_parent:
+            parent = (j.parent_job_id or "-")[:12]
+            line += f"  {parent:<12}"
+        line += f"  {','.join(j.tags) if j.tags else '-'}"
+        print(line)
 
 
 @app.command("ps", help="List recent jobs (ps alias, like process listing).")
@@ -251,14 +256,15 @@ def _render_monitor_frame(
     if not jobs:
         lines.append("  (none)")
     else:
-        lines.append(f"  {'JOB_ID':<8}  {'STATUS':<11}  {'MODEL':<16}  AGE")
+        lines.append(f"  {'JOB_ID':<8}  {'STATUS':<11}  {'MODEL':<16}  {'STEP':<16}  AGE")
         for j in jobs:
             jid = (getattr(j, "job_id", "") or "")[:8]
             status = j.status.value if hasattr(j.status, "value") else str(j.status)
             model = (getattr(j, "model", None) or "?")[:16]
+            step = ((getattr(j, "metadata", None) or {}).get("step_name") or "-")[:16]
             age = _monitor_age(getattr(j, "timings", None), now=clock)
             status_cell = paint(f"{status:<11}", _MONITOR_STATUS_COLORS.get(status, typer.colors.WHITE))
-            lines.append(f"  {jid:<8}  {status_cell}  {model:<16}  {age}")
+            lines.append(f"  {jid:<8}  {status_cell}  {model:<16}  {step:<16}  {age}")
 
     lines.append("")
     lines.append("Ctrl-C to stop.")
@@ -345,6 +351,57 @@ def monitor(
             sys.stdout.flush()
     if live:
         typer.secho("Stopped.", fg=typer.colors.YELLOW)
+
+
+@app.command()
+def debug(
+    job_id: str | None = typer.Argument(None, help="Show the captured In→Out for one job (call id)."),
+    session: str | None = typer.Option(None, "--session", help="Filter by session id."),
+    trace: str | None = typer.Option(None, "--trace", help="Filter by trace id (chained flows)."),
+    step: str | None = typer.Option(None, "--step", help="Filter by step name."),
+    limit: int = typer.Option(50, "--limit", "-l"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show model/timing/metadata too."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Tail new calls live."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """LLM debugging view for queue jobs: full In→Out per call, chains as trees.
+
+    Sugar over `galeed trace --source hoglah` (the family-wide debugger) using
+    this instance's galeed connection settings. Needs galeed[cli] installed and
+    galeed_enabled + galeed_capture_io on the worker that ran the jobs.
+    """
+    try:
+        from galeed.cli import main as galeed_main
+    except ImportError:
+        typer.secho(
+            "Debugging needs galeed with its cli extra: pip install 'galeed[cli]' "
+            "(and hoglah[galeed] for emission).",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    from .config import HoglahSettings
+
+    cfg = HoglahSettings()
+    argv = [
+        "trace", "--source", "hoglah",
+        "--mongo-uri", cfg.galeed_mongo_uri, "--mongo-db", cfg.galeed_mongo_db,
+        "--limit", str(limit),
+    ]
+    if job_id:
+        argv += ["--call", job_id]
+    if session:
+        argv += ["--session", session]
+    if trace:
+        argv += ["--trace", trace]
+    if step:
+        argv += ["--step", step]
+    if verbose:
+        argv.append("--verbose")
+    if follow:
+        argv.append("--follow")
+    if json_out:
+        argv.append("--json")
+    raise typer.Exit(galeed_main(argv))
 
 
 @app.command()
@@ -624,6 +681,7 @@ def submit(
     # Additional traceability / user data (from full submit API)
     metadata: str | None = typer.Option(None, "--metadata", help="User metadata as JSON object, e.g. '{\"key\":\"value\"}'"),
     parent_job_id: str | None = typer.Option(None, "--parent-job-id", help="Parent job ID for chaining/traceability"),
+    step: str | None = typer.Option(None, "--step", help="Human step name for the LLM debugging view, e.g. initial_research"),
     # CLI control
     db: Path | None = typer.Option(None, "--db"),
     real: bool = typer.Option(False, "--real", help="Use real Ollama (requires server); default is safe stub"),
@@ -688,6 +746,7 @@ def submit(
         keep_alive=keep_alive,
         metadata=meta_dict,
         parent_job_id=parent_job_id,
+        step_name=step,
     )
     typer.secho(f"Submitted: {job_id}", fg=typer.colors.GREEN)
 

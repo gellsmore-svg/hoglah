@@ -130,6 +130,7 @@ def _result_to_dict(res: JobResult) -> dict[str, Any]:
             timings[key] = value.isoformat()
     d["timings"] = timings
     d["age"] = _age(res.timings)
+    d["step_name"] = (res.metadata or {}).get("step_name")
     if res.error:
         preview = "ERROR: " + res.error[:120]
     elif res.output:
@@ -178,6 +179,7 @@ def _job_row(job: dict[str, Any]) -> str:
   <td><a href="/jobs/{escape(job.get("job_id") or "")}"><code>{escape((job.get("job_id") or "")[:8])}…</code></a></td>
   <td><span class="badge {escape(status)}">{escape(status)}</span></td>
   <td><code>{escape(job.get("model") or "?")}</code></td>
+  <td>{escape(job.get("step_name") or "—")}</td>
   <td>{escape(tags)}</td>
   <td>{parent_html}</td>
   <td>{escape(job.get("age") or "-")}</td>
@@ -247,9 +249,9 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
 <div class="summary" id="cards">{cards}</div>
 <h2>Recent jobs</h2>
 <table>
-<thead><tr><th>Job</th><th>Status</th><th>Model</th><th>Tags</th><th>Parent</th><th>Age</th><th>Preview</th></tr></thead>
+<thead><tr><th>Job</th><th>Status</th><th>Model</th><th>Step</th><th>Tags</th><th>Parent</th><th>Age</th><th>Preview</th></tr></thead>
 <tbody id="jobs">
-{rows or '<tr><td colspan="7" class="muted">(no jobs)</td></tr>'}
+{rows or '<tr><td colspan="8" class="muted">(no jobs)</td></tr>'}
 </tbody>
 </table>
 <script>
@@ -267,6 +269,7 @@ function jobRow(j) {{
     '<td><a href="/jobs/' + esc(j.job_id) + '"><code>' + esc(j.job_id.slice(0, 8)) + '…</code></a></td>' +
     '<td><span class="badge ' + esc(j.status) + '">' + esc(j.status) + '</span></td>' +
     '<td><code>' + esc(j.model || '?') + '</code></td>' +
+    '<td>' + esc(j.step_name || '—') + '</td>' +
     '<td>' + esc((j.tags || []).join(', ') || '—') + '</td>' +
     '<td>' + parent + '</td>' +
     '<td>' + esc(j.age || '-') + '</td>' +
@@ -291,7 +294,7 @@ async function refresh() {{
       STATUSES.map(s => card(s, counts[s] || 0, '/?status=' + s, s)).join('');
     document.getElementById('jobs').innerHTML =
       data.jobs.map(jobRow).join('') ||
-      '<tr><td colspan="7" class="muted">(no jobs)</td></tr>';
+      '<tr><td colspan="8" class="muted">(no jobs)</td></tr>';
     document.getElementById('pulse').textContent =
       'updated ' + new Date().toLocaleTimeString();
   }} catch (e) {{
@@ -310,6 +313,10 @@ setInterval(refresh, 4000);
         except KeyError:
             raise HTTPException(404, f"job not found: {job_id}")
         d = _result_to_dict(job)
+        # The full input lives in the persisted request (package-internal store
+        # access — this monitor ships inside hoglah).
+        stored = client._store.get(job_id) or {}
+        stored_request = stored.get("request") or {}
 
         timing_rows = "".join(
             f"<tr><th>{escape(str(k))}</th><td class='mono'>{escape(str(v))}</td></tr>"
@@ -334,6 +341,23 @@ setInterval(refresh, 4000);
         if d.get("embedding_dim"):
             embedding_html = f"<tr><th>Embedding</th><td>{d['embedding_dim']} dimensions</td></tr>"
 
+        # Full input (the debugging view's "In"): prompt or the messages list.
+        input_html = ""
+        messages = stored_request.get("messages")
+        if messages:
+            blocks = "".join(
+                f'<p class="muted mono">[{escape(str(m.get("role", "?")))}]</p>'
+                f"<pre>{escape(str(m.get('content', '')))}</pre>"
+                for m in messages
+            )
+            input_html = f"<h2>Input</h2>{blocks}"
+        elif stored_request.get("prompt"):
+            input_html = f"<h2>Input</h2><pre>{escape(str(stored_request['prompt']))}</pre>"
+
+        step_html = ""
+        if d.get("step_name"):
+            step_html = f"<tr><th>Step</th><td>{escape(d['step_name'])}</td></tr>"
+
         output_html = ""
         if d.get("error"):
             output_html = f"<h2>Error</h2><pre>{escape(d['error'])}</pre>"
@@ -351,6 +375,7 @@ setInterval(refresh, 4000);
 <tr><th>Status</th><td><span class="badge {escape(d["status"])}">{escape(d["status"])}</span>
   <span class="muted">({escape(d.get("age") or "-")} ago)</span></td></tr>
 <tr><th>Model</th><td><code>{escape(d.get("model") or "?")}</code></td></tr>
+{step_html}
 <tr><th>Tags</th><td>{escape(", ".join(d.get("tags") or []) or "—")}</td></tr>
 <tr><th>Parent job</th><td>{parent_html}</td></tr>
 <tr><th>Usage</th><td>{usage_html}</td></tr>
@@ -358,7 +383,9 @@ setInterval(refresh, 4000);
 {embedding_html}
 {timing_rows}
 </table>
+{input_html}
 {output_html}
+<p class="muted">Cross-family trace view: <code>galeed trace --call {escape(d["job_id"])}</code></p>
 """
         return _base(f"Job {d['job_id'][:8]}", body, db_label)
 
