@@ -313,6 +313,9 @@ messaging bridges). Size it to your hardware: a model must fit in VRAM (with
 spillover to system RAM, which is much slower on CPU) — frontier models like
 MiniMax-M3 or Kimi-K2 (hundreds of GB) need server-class hardware, not a laptop.
 
+**Native Linux:** when Ollama runs on the same machine as Hoglah, the default
+`http://localhost:11434` is sufficient — no extra networking setup.
+
 **WSL2:** if Ollama runs as the Windows binary and your code runs in WSL, the
 daemon is *not* reachable at `localhost`. Set `OLLAMA_HOST=0.0.0.0` on the Windows
 side (`setx OLLAMA_HOST "0.0.0.0"`, then restart Ollama) and point the client at
