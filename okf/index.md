@@ -29,11 +29,16 @@ description of Hoglah's concepts, modules, and CLI.
 - **[Modules](modules/index.md)** — the code: the client, the job model, storage
   backends, inference adapters, and the messaging bridges + submitter.
 - **[CLI](cli/index.md)** — the `hoglah` commands: submit, run a worker, run a
-  bridge, and inspect the queue.
+  bridge, and inspect the queue — plus `serve` (the read-only web queue monitor)
+  and `debug` (the In→Out LLM call tree for executed jobs).
+- **Observability** — with the `galeed` extra and `galeed_enabled`, every job
+  emits lifecycle events onto the family trace spine, and `galeed_capture_io`
+  records each generate job's complete prompt/messages + output into the
+  `llm_calls` debugging store (step names via `submit(step_name=...)`).
 
 ## At a glance
 
 - Storage: **SQLite by default** (zero setup), MongoDB optional — see [storage](modules/storage.md).
 - Inference: a deterministic **stub by default**; real Ollama is opt-in — see [adapters](modules/adapters.md).
 - Brokers: **Kafka, RabbitMQ, Redis Streams** bridges, all crash-safe — see [messaging bridges](modules/messaging-bridges.md).
-- Current version: 0.7.0 (Apache-2.0).
+- Current version: 0.8.0 (Apache-2.0).
