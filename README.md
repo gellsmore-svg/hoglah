@@ -274,6 +274,21 @@ group with explicit `XACK` after a durable enqueue; a consumer's unacked entries
 a crash mid-processing re-delivers rather than loses. Run several `redis-bridge`
 processes (distinct `--consumer-name`s) in one group to scale out.
 
+## Web monitor & debugging
+
+- `hoglah serve` (needs `pip install hoglah[web]`, default `127.0.0.1:8781`) — a
+  read-only queue dashboard: live status cards, jobs table with step names, and
+  a job detail page showing the full input and output.
+- `hoglah debug [JOB_ID]` — the clean In→Out call tree for executed jobs
+  (chains render as trees; `--verbose` reveals model/timing/metadata). Requires
+  `galeed[cli]` and capture enabled.
+- **Family trace spine**: with `galeed_enabled` (env `HOGLAH_GALEED_ENABLED=1`,
+  `galeed` extra) every job emits lifecycle events to Galeed, and with
+  `galeed_capture_io` (default on) records its complete prompt/messages and
+  output into the `llm_calls` debugging store — viewable via `galeed trace`,
+  `galeed serve`, or Mizpah. Label calls with `submit(step_name=...)` / `--step`
+  and thread `metadata={"trace_id": ...}` through multi-step flows.
+
 ## Configuration
 
 Every option can be set in the `Hoglah(config={...})` dict or via a `HOGLAH_*`

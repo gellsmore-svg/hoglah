@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Web queue monitor** — `hoglah serve` (default :8781, `web` extra): read-only
+  dashboard (status cards double as filters, live-polling jobs table, job detail
+  with full In→Out and step name) + JSON API.
+- **Family trace spine emission** (`galeed` extra, `galeed_enabled` /
+  `HOGLAH_GALEED_ENABLED`): job.queued/started/completed/failed/cancelled events
+  with job_id as trace_id; best-effort, never affects the queue.
+- **LLM debugging capture** (`galeed_capture_io`, default on with the spine):
+  every generate job records its COMPLETE prompt/messages and output into
+  galeed's `llm_calls` — call_id = job_id, parent_call_id = parent_job_id,
+  caller-threaded trace via `metadata.trace_id`.
+- **Step names**: `submit(step_name=...)` / `--step` label calls for the
+  debugging views; STEP column in `list`/`ps`/`monitor` and the web monitor.
+- **`hoglah debug`** — the In→Out call tree for queue jobs (sugar over
+  `galeed trace --source hoglah`).
+
+### Fixed
+- Witness lazy Mongo init had a thread race that silently dropped the first
+  job's events (resolved-flag-before-assignment); now locked, flag-last.
+
 ## [0.8.0] - 2026-06-24
 
 ### Added
