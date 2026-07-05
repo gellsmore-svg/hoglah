@@ -13,6 +13,8 @@ timestamp: 2026-06-19T00:00:00Z
   public API and (optionally) the worker loop.
 - **[Job model](models.md)** (`models.py`) — `JobRequest`, `JobResult`, `JobStatus`.
 - **[Storage](storage.md)** (`store.py`, `mongo_store.py`) — the `JobStore` seam:
+- **[web](web.md)** — the read-only queue monitor behind `hoglah serve`.
+- **[tracing](tracing.md)** — the Galeed witness: spine events + llm_calls capture.
   SQLite (default) and MongoDB backends.
 - **[Adapters](adapters.md)** (`adapters.py`) — `OllamaAdapter` (real) and
   `StubAdapter` (deterministic default) behind `BaseAdapter`.

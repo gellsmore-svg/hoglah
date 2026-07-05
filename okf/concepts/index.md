@@ -21,3 +21,5 @@ The design decisions are recorded in
   give exactly-once *effect* across the messaging bridges (ADR-018/019/020).
 - **[Job kinds](job-kinds.md)** — one queue for `generate`, chat, and `embed`
   (ADR-004/013).
+- **[Observability](observability.md)** — spine events + full-I/O debugging
+  capture via Galeed; opt-in, best-effort, queue-neutral.
