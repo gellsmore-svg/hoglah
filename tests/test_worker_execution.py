@@ -659,3 +659,16 @@ def test_cancel_wins_over_a_failing_job():
         assert res.error == "Cancelled by user"
     finally:
         h.close()
+
+
+def test_callback_ssrf_guard_blocks_private_when_disabled(tmp_path):
+    """With callback_allow_private_hosts=False, loopback targets are refused
+    (and non-http schemes are refused regardless)."""
+    from hoglah.client import _callback_url_allowed
+
+    ok, _ = _callback_url_allowed("http://127.0.0.1:9/x", allow_private=False)
+    assert not ok
+    ok, _ = _callback_url_allowed("http://127.0.0.1:9/x", allow_private=True)
+    assert ok
+    ok, reason = _callback_url_allowed("file:///etc/passwd", allow_private=True)
+    assert not ok and "scheme" in reason

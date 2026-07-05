@@ -200,9 +200,13 @@ class HoglahSettings(BaseSettings):
         description="Number of attempts for an outbound callback POST before giving up (output file remains as fallback).",
     )
     callback_allow_private_hosts: bool = Field(
-        default=False,
-        description="Allow callback_url targets that resolve to private/loopback "
-        "addresses (SSRF guard off) — enable only for local development.",
+        default=True,
+        description="Allow callback_url targets on private/loopback addresses. "
+        "True by default (Hoglah is local-first; localhost callbacks are the "
+        "normal mode). Set False (HOGLAH_CALLBACK_ALLOW_PRIVATE_HOSTS=0) when "
+        "exposing Hoglah via messaging bridges so submitter-supplied URLs "
+        "cannot reach internal services (SSRF guard). http(s)-only is always "
+        "enforced.",
     )
 
     # Logging (ADR-007 / DX)
