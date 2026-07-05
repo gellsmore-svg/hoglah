@@ -58,6 +58,50 @@ logger = logging.getLogger("hoglah")
 _SHUTDOWN_DRAIN_SECONDS = 2.0
 
 
+def _redact_url(url: str) -> str:
+    """scheme://host[:port]/… — path/query stripped so logs don't leak endpoints."""
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(url)
+        return f"{parts.scheme}://{parts.netloc}/…"
+    except Exception:
+        return "<unparseable-url>"
+
+
+def _callback_url_allowed(url: str, *, allow_private: bool) -> tuple[bool, str]:
+    """SSRF guard for outbound callback POSTs: http(s) only, and private/
+    loopback/link-local targets are refused unless explicitly allowed."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return False, "unparseable url"
+    if parts.scheme not in ("http", "https"):
+        return False, f"scheme {parts.scheme!r} not allowed"
+    host = parts.hostname
+    if not host:
+        return False, "no host"
+    if allow_private:
+        return True, "private targets allowed by config"
+    try:
+        infos = socket.getaddrinfo(host, None)
+        addresses = {info[4][0] for info in infos}
+    except OSError:
+        return False, "host does not resolve"
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return False, f"resolves to non-public address {address}"
+    return True, "ok"
+
+
 def _run_async(coro_factory):
     """Run an async coroutine to completion from synchronous code, whether
     or not an event loop is already running in this thread.
@@ -920,6 +964,16 @@ class Hoglah:
         failures with exponential backoff. Best-effort: gives up after
         `callback_max_retries` attempts and logs — the output file (if any) is
         the fallback path for the submitter."""
+        allowed, reason = _callback_url_allowed(
+            url, allow_private=self.config.callback_allow_private_hosts
+        )
+        if not allowed:
+            logger.warning(
+                "Callback for job %s refused: %s (%s). Set "
+                "callback_allow_private_hosts=True for local development targets.",
+                job_id, reason, _redact_url(url),
+            )
+            return
         attempts = self.config.callback_max_retries
         timeout = self.config.callback_timeout_seconds
         data = payload.encode("utf-8")
@@ -934,7 +988,9 @@ class Hoglah:
                 )
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     if 200 <= resp.status < 300:
-                        logger.debug("Callback for job %s delivered to %s", job_id, url)
+                        logger.debug(
+                            "Callback for job %s delivered to %s", job_id, _redact_url(url)
+                        )
                         return
                     last_err = f"HTTP {resp.status}"
             except urllib.error.HTTPError as exc:

@@ -1,0 +1,24 @@
+name: Nightly integration
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev,cli,mongo,redis,web]"
+      - run: pytest -q
+        env:
+          HOGLAH_MONGO_URI: mongodb://localhost:27017
+          HOGLAH_REDIS_URL: redis://localhost:6379/0

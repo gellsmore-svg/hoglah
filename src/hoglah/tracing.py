@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import OrderedDict
 from typing import Any
 
 logger = logging.getLogger("hoglah")
@@ -46,6 +47,8 @@ class JobWitness:
         self._db = db
         self._db_resolved = db is not None
         self._db_lock = threading.Lock()
+        self._tracers: "OrderedDict[str, Any]" = OrderedDict()
+        self._tracers_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -95,12 +98,7 @@ class JobWitness:
             logger.debug("galeed not installed; job tracing disabled for this instance")
             return
         try:
-            tracer = Tracer(
-                trace_id=job_id,
-                session_id=session_id or "hoglah",
-                db=self._database(),
-                source="hoglah",
-            )
+            tracer = self._tracer_for(Tracer, job_id, session_id or "hoglah")
             tracer.emit(
                 type,
                 status=status,
@@ -111,6 +109,25 @@ class JobWitness:
             )
         except Exception:
             logger.debug("galeed emit failed (ignored)", exc_info=True)
+
+    def _tracer_for(self, tracer_cls: Any, job_id: str, session_id: str) -> Any:
+        """One Tracer per job (bounded LRU of 256): lifecycle events share a
+        sequence and tracer/Mongo setup isn't repeated per emit."""
+        with self._tracers_lock:
+            tracer = self._tracers.get(job_id)
+            if tracer is None:
+                tracer = tracer_cls(
+                    trace_id=job_id,
+                    session_id=session_id,
+                    db=self._database(),
+                    source="hoglah",
+                )
+                self._tracers[job_id] = tracer
+                while len(self._tracers) > 256:
+                    self._tracers.popitem(last=False)
+            else:
+                self._tracers.move_to_end(job_id)
+            return tracer
 
     def record_io(self, *, job_id: str, request: Any, result: Any) -> None:
         """Record the job's FULL input/output into galeed's llm_calls (the family

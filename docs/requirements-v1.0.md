@@ -35,7 +35,7 @@ The tool addresses the common challenge of running multiple background AI/agent 
 
 ## 3. Non-Goals (V1)
 - Full distributed orchestration or high-availability clustering.
-- Built-in web UI (deferred to V2).
+- ~~Built-in web UI (deferred to V2)~~ — shipped ahead of schedule: `hoglah serve`, the read-only web queue monitor (status cards, live jobs table, full In→Out job detail).
 - Advanced authentication/multi-tenancy (local use only).
 - Support for non-Ollama backends (can be added later).
 - Real-time streaming UI (file/callback sufficient for V1).

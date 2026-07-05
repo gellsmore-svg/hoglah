@@ -17,6 +17,8 @@ in-process and best-effort; pair it with a durable store for restart safety.
 
 from __future__ import annotations
 
+import logging
+
 import heapq
 import itertools
 import threading
@@ -30,6 +32,8 @@ PRIORITY_LOW = 4
 PRIORITY_BACKGROUND = 5
 PRIORITY_IDLE = 6
 
+
+logger = logging.getLogger("hoglah")
 
 class SessionPriorityQueue:
     """Priority queue with per-key (e.g. per-session) serial execution."""
@@ -84,7 +88,10 @@ class SessionPriorityQueue:
             try:
                 fn(*args, **kwargs)
             except Exception:
-                pass
+                logger.exception(
+                    "SessionPriorityQueue task failed (key=%s, fn=%s)",
+                    key, getattr(fn, "__name__", fn),
+                )
             finally:
                 with self._cond:
                     if key is not None:

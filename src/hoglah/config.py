@@ -199,6 +199,11 @@ class HoglahSettings(BaseSettings):
         ge=1,
         description="Number of attempts for an outbound callback POST before giving up (output file remains as fallback).",
     )
+    callback_allow_private_hosts: bool = Field(
+        default=False,
+        description="Allow callback_url targets that resolve to private/loopback "
+        "addresses (SSRF guard off) — enable only for local development.",
+    )
 
     # Logging (ADR-007 / DX)
     log_level: str = Field(
