@@ -381,6 +381,13 @@ class Hoglah:
             callback_url=callback_url,
         )
 
+        if callback_url:
+            allowed, reason = _callback_url_allowed(
+                callback_url, allow_private=self.config.callback_allow_private_hosts
+            )
+            if not allowed:
+                raise ValueError(f"callback_url not allowed: {reason}")
+
         # Enqueue (store the request)
         job_id = self._store.enqueue(req, callback_key=callback_key)
         self._witness.emit(
@@ -1004,7 +1011,7 @@ class Hoglah:
                 time.sleep(min(2 ** attempt, 8))
         logger.warning(
             "Callback POST to %s failed for job %s after %d attempt(s): %s",
-            url, job_id, attempts, last_err,
+            _redact_url(url), job_id, attempts, last_err,
         )
 
     def _recover_interrupted_jobs(self) -> None:
