@@ -592,6 +592,13 @@ class Hoglah:
         except Exception:
             return None
 
+    def _elapsed_ms(self, start: Any, end: Any) -> int | None:
+        started_at = self._parse_dt(start)
+        ended_at = self._parse_dt(end)
+        if started_at is None or ended_at is None:
+            return None
+        return max(0, int((ended_at - started_at).total_seconds() * 1000))
+
     def _redeliver_restart_callbacks(self) -> None:
         """On startup, attempt to re-deliver callbacks for recently completed jobs.
 
@@ -716,6 +723,7 @@ class Hoglah:
                 session_id=(request.metadata or {}).get("session_id"),
                 model=request.model,
                 kind=request.kind,
+                queued_duration_ms=self._elapsed_ms(row.get("created_at"), row.get("updated_at")),
             )
 
             # Execute with retries
@@ -730,6 +738,7 @@ class Hoglah:
 
             # Persist final result
             self._store.set_result(job_id, result)
+            terminal_row = self._store.get(job_id) or {}
 
             failed = result.status == JobStatus.FAILED
             self._witness.emit(
@@ -746,6 +755,8 @@ class Hoglah:
                 kind=request.kind,
                 usage=result.usage or {},
                 truncated=result.truncated,
+                duration_ms=self._elapsed_ms(row.get("created_at"), terminal_row.get("updated_at")),
+                processing_duration_ms=self._elapsed_ms(row.get("updated_at"), terminal_row.get("updated_at")),
             )
             self._witness.record_io(job_id=job_id, request=request, result=result)
 

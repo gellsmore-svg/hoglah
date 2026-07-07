@@ -55,6 +55,10 @@ def test_job_lifecycle_emits_queued_started_completed(traced_client) -> None:
         assert event["metadata"]["job_id"] == job_id  # correlation key mirrored
         assert event["source"] == "hoglah"
         assert event["session_id"] == "sess-42"  # caller session propagated
+    by_type = {event["type"]: event for event in _events(fake)}
+    assert isinstance(by_type[JOB_STARTED]["metadata"]["queued_duration_ms"], int)
+    assert isinstance(by_type[JOB_COMPLETED]["metadata"]["duration_ms"], int)
+    assert isinstance(by_type[JOB_COMPLETED]["metadata"]["processing_duration_ms"], int)
 
 
 def test_cancel_emits_cancelled(traced_client) -> None:
