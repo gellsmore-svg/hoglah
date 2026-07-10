@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-10
+
 ### Added
 - **Web queue monitor** — `hoglah serve` (default :8781, `web` extra): read-only
   dashboard (status cards double as filters, live-polling jobs table, job detail
@@ -22,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   debugging views; STEP column in `list`/`ps`/`monitor` and the web monitor.
 - **`hoglah debug`** — the In→Out call tree for queue jobs (sugar over
   `galeed trace --source hoglah`).
+- **Session priority queue** — `SessionPriorityQueue` provides keyed serial
+  execution and priority scheduling for family background work.
+- **Keturah capability manifest** — `build_manifest()` makes Hoglah
+  discoverable through the family MCP interface.
 
 ### Fixed
 - Witness lazy Mongo init had a thread race that silently dropped the first

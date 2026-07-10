@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoglah"
-version = "0.8.0"
+version = "0.9.0"
 description = "Lightweight local-first job queue manager and Ollama wrapper for resource-constrained environments."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,7 +35,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "keturah>=0.1",  # LLM-interface manifest (build_manifest / to_mcp)
+    "keturah @ git+https://github.com/gellsmore-svg/keturah.git@v0.3.0",  # LLM-interface manifest
     "pydantic>=2.7",
     "pydantic-settings>=2.0",
     "ollama>=0.3",  # official ollama python client
@@ -68,7 +68,7 @@ web = [
     "uvicorn>=0.29",
 ]
 galeed = [
-    "galeed>=0.1",   # family trace spine: job-lifecycle events (galeed_enabled=True)
+    "galeed @ git+https://github.com/gellsmore-svg/galeed.git@v0.2.0",  # family trace spine
     "pymongo>=4.6",  # persistence into the shared trace_events collection
 ]
 
