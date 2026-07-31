@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `hoglah serve` now closes its client and SQLite handle on shutdown via a FastAPI
+  lifespan hook (#12) — the monitor leaked a connection on every uvicorn reload.
 - **Intermittent SIGSEGV in the test suite** (#13). `SQLiteJobStore.close()` freed
   the sqlite3 connection without taking the lock every other query holds. Because
   the store is opened `check_same_thread=False` and shared with background threads

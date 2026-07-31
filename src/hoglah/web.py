@@ -18,6 +18,8 @@ Requires the ``web`` extra: ``pip install hoglah[web]``.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
 from html import escape
@@ -195,7 +197,22 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
     client = Hoglah(config=config, start_worker=False)
     db_label = str(client.config.db_path)
 
-    app = FastAPI(title="Hoglah", description="Read-only queue monitor")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Close the client (and its SQLite handle) when the server stops.
+
+        Without this the store leaked a connection on every uvicorn reload. It
+        matters beyond tidiness: the store is shared with background threads, so
+        an unclosed handle is the same footgun that produced the #13 segfault.
+        """
+        yield
+        client.close()
+
+    app = FastAPI(
+        title="Hoglah",
+        description="Read-only queue monitor",
+        lifespan=lifespan,
+    )
     app.state.client = client
 
     def _summary(status: str | None, limit: int) -> dict[str, Any]:

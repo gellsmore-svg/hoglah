@@ -27,7 +27,24 @@ def seeded_db(tmp_path):
 
 @pytest.fixture()
 def client(seeded_db):
-    return TestClient(create_app(db_path=seeded_db))
+    # `with` so the lifespan runs — startup on enter, store closed on exit.
+    with TestClient(create_app(db_path=seeded_db)) as test_client:
+        yield test_client
+
+
+def test_lifespan_closes_the_client_store_on_shutdown(seeded_db):
+    """The monitor must not leak its SQLite handle on shutdown/reload (#12)."""
+    import sqlite3
+
+    app = create_app(db_path=seeded_db)
+    client = app.state.client
+
+    with TestClient(app):
+        assert client.stats()["total_jobs"] == 2  # store is live while serving
+
+    # Shutdown ran the lifespan, which closed the client and its store.
+    with pytest.raises(sqlite3.ProgrammingError):
+        client.stats()
 
 
 def test_dashboard_renders_counts_and_jobs(client) -> None:
