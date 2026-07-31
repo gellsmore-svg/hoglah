@@ -103,31 +103,32 @@ def test_named_callback_registry_restart_delivery():
     def my_handler(result: JobResult):
         calls.append(result)
 
-    # First instance: submit with named key + mark it completed manually
-    h1 = Hoglah(config={"db_path": db}, callbacks={"my_handler": my_handler})
-    job_id = h1.submit(
-        prompt="test callback",
-        model="gemma:2b",
-        callback="my_handler",  # str means named registry key
-    )
+    # First instance: submit with named key + mark it completed manually.
+    # Closed before the second instance opens, so "the process was down" is
+    # literally true and no worker thread outlives the test.
+    with Hoglah(config={"db_path": db}, callbacks={"my_handler": my_handler}) as h1:
+        job_id = h1.submit(
+            prompt="test callback",
+            model="gemma:2b",
+            callback="my_handler",  # str means named registry key
+        )
 
-    # Simulate the job having completed while the process was "down"
-    # (we directly poke the store for the test)
-    fake_result = JobResult(
-        job_id=job_id,
-        status=JobStatus.COMPLETED,
-        output="done",
-        model="gemma:2b",
-    )
-    h1._store.set_result(job_id, fake_result)  # type: ignore[attr-defined]
+        # Simulate the job having completed while the process was "down"
+        # (we directly poke the store for the test)
+        fake_result = JobResult(
+            job_id=job_id,
+            status=JobStatus.COMPLETED,
+            output="done",
+            model="gemma:2b",
+        )
+        h1._store.set_result(job_id, fake_result)  # type: ignore[attr-defined]
 
     # New instance with the same registry should re-deliver
     calls.clear()
-    Hoglah(config={"db_path": db}, callbacks={"my_handler": my_handler})
-
-    assert len(calls) == 1
-    assert calls[0].job_id == job_id
-    assert calls[0].status == JobStatus.COMPLETED
+    with Hoglah(config={"db_path": db}, callbacks={"my_handler": my_handler}):
+        assert len(calls) == 1
+        assert calls[0].job_id == job_id
+        assert calls[0].status == JobStatus.COMPLETED
 
 
 def test_direct_callback_not_redelivered_after_restart():
@@ -139,15 +140,16 @@ def test_direct_callback_not_redelivered_after_restart():
     def direct_cb(result: JobResult):
         calls.append(result)
 
-    h1 = Hoglah(config={"db_path": db})
-    job_id = h1.submit(prompt="direct", model="gemma:2b", callback=direct_cb)
+    with Hoglah(config={"db_path": db}) as h1:
+        job_id = h1.submit(prompt="direct", model="gemma:2b", callback=direct_cb)
 
-    # Manually complete
-    fake = JobResult(job_id=job_id, status=JobStatus.COMPLETED, output="x")
-    h1._store.set_result(job_id, fake)  # type: ignore[attr-defined]
+        # Manually complete
+        fake = JobResult(job_id=job_id, status=JobStatus.COMPLETED, output="x")
+        h1._store.set_result(job_id, fake)  # type: ignore[attr-defined]
 
     # New instance has no knowledge of the direct callable
-    Hoglah(config={"db_path": db})
+    with Hoglah(config={"db_path": db}):
+        pass
 
     # The callback should NOT have been called by the new instance
     # (it was only remembered inside h1)

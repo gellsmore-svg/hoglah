@@ -82,8 +82,19 @@ def _get_hoglah(
     *,
     real: bool = False,
     ollama_host: str | None = None,
+    start_worker: bool = False,
 ) -> Hoglah:
-    """Factory used by CLI commands. Respects --real / HOGLAH_USE_REAL_ADAPTER."""
+    """Factory used by CLI commands. Respects --real / HOGLAH_USE_REAL_ADAPTER.
+
+    No background worker by default: these commands read or enqueue and then
+    exit, and jobs are executed by a long-running `hoglah worker` (or one of
+    the bridge commands). Starting a worker here would spawn a daemon thread
+    that outlives the command's useful work — harmless in a one-shot process,
+    but the CLI is also invoked in-process (CliRunner in the tests, embedding
+    callers), where each such thread accumulates. Only commands that must
+    execute a job themselves to make progress — `wait`, and `submit --wait` —
+    ask for one, and they close it when done.
+    """
     cfg: dict[str, Any] = {}
     if db:
         cfg["db_path"] = db
@@ -91,7 +102,7 @@ def _get_hoglah(
         cfg["ollama_host"] = ollama_host
 
     # use_real= is the clean way; adapter= can still be passed for advanced cases
-    return Hoglah(config=cfg, use_real=real)
+    return Hoglah(config=cfg, use_real=real, start_worker=start_worker)
 
 
 @app.command()
@@ -638,7 +649,7 @@ def wait(
     json_out: bool = typer.Option(False, "--json", help="Emit JSON result instead of human text"),
 ) -> None:
     """Block until the job reaches a terminal state, then print result (or error)."""
-    h = _get_hoglah(db)
+    h = _get_hoglah(db, start_worker=True)
     try:
         res = h.wait(job_id, timeout=timeout)
         if json_out:
@@ -659,6 +670,8 @@ def wait(
     except KeyError:
         typer.secho(f"Job not found: {job_id}", fg=typer.colors.RED)
         raise typer.Exit(1)
+    finally:
+        h.close()
 
 
 @app.command()
@@ -727,7 +740,9 @@ def submit(
         typer.secho("Error: provide a PROMPT argument or --messages (JSON).", fg=typer.colors.RED)
         raise typer.Exit(1)
 
-    h = _get_hoglah(db, real=real, ollama_host=ollama_host)
+    # A worker is only needed if we are going to block for the result here;
+    # a bare submit just enqueues and leaves execution to `hoglah worker`.
+    h = _get_hoglah(db, real=real, ollama_host=ollama_host, start_worker=wait)
 
     job_id = h.submit(
         prompt=prompt,
@@ -765,6 +780,8 @@ def submit(
         except TimeoutError:
             typer.secho(f"Timed out waiting for {job_id}", fg=typer.colors.RED)
             raise typer.Exit(1)
+        finally:
+            h.close()
 
 
 @app.command()

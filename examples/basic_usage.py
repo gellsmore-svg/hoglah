@@ -23,7 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 
-from hoglah import Hoglah, JobResult, JobStatus
+from hoglah import Hoglah, JobResult
 
 
 def _temp_db() -> Path:

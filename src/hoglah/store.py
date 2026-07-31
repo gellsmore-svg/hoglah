@@ -165,6 +165,7 @@ class SQLiteJobStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._lock = threading.Lock()  # protect concurrent access from worker thread + main
+        self._closed = False
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -379,7 +380,21 @@ class SQLiteJobStore:
         return cur.rowcount > 0
 
     def close(self) -> None:
-        self._conn.close()
+        """Close the connection, under the same lock every query holds.
+
+        Closing bare was a segfault, not a tidiness issue: ``check_same_thread=False``
+        means background threads (the worker, and kafka_bridge's fire-and-forget
+        ``hoglah-msg-pub-*`` publishers) execute on this connection, and freeing
+        it from another thread mid-``execute`` tears the statement out from under
+        the sqlite3 C extension. Taking the lock makes close wait for the
+        in-flight statement; the ``_closed`` flag then turns any later call into a
+        clean ``ProgrammingError`` instead of a use-after-free.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._conn.close()
 
     def get_status_counts(self) -> dict[str, int]:
         """Return dict of status -> count for quick queue overview."""

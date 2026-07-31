@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Intermittent SIGSEGV in the test suite** (#13). `SQLiteJobStore.close()` freed
+  the sqlite3 connection without taking the lock every other query holds. Because
+  the store is opened `check_same_thread=False` and shared with background threads
+  (the worker, and kafka_bridge's fire-and-forget `hoglah-msg-pub-*` publishers),
+  closing could tear a running `execute` out from under the C extension. `close()`
+  now takes the lock and is idempotent; a late call after close raises a clean
+  `sqlite3.ProgrammingError`, which `_publish_now` already handles by leaving the
+  job for restart re-emit.
+- CLI commands no longer start a background worker they never use — only `wait`
+  and `submit --wait` ask for one, and both now close it. Prevents daemon-thread
+  accumulation when the CLI is driven in-process (CliRunner, embedding callers).
+- Tests that constructed `Hoglah` instances purely for a constructor side effect
+  now use the context manager, so no worker thread outlives the test.
+
 ## [0.9.0] - 2026-07-10
 
 ### Added
