@@ -758,7 +758,19 @@ class Hoglah:
                 duration_ms=self._elapsed_ms(row.get("created_at"), terminal_row.get("updated_at")),
                 processing_duration_ms=self._elapsed_ms(row.get("updated_at"), terminal_row.get("updated_at")),
             )
-            self._witness.record_io(job_id=job_id, request=request, result=result)
+            # The same timing the spine event above reports — thread it into the
+            # llm_calls record too, so latency is answerable from the debugging
+            # view and not only from the job lifecycle stream.
+            self._witness.record_io(
+                job_id=job_id,
+                request=request,
+                result=result,
+                started_at=row.get("updated_at"),
+                completed_at=terminal_row.get("updated_at"),
+                duration_ms=self._elapsed_ms(
+                    row.get("updated_at"), terminal_row.get("updated_at")
+                ),
+            )
 
             # Out-of-band delivery for decoupled submitters (output file; H3 callback)
             self._deliver(result, request)

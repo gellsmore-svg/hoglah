@@ -129,7 +129,16 @@ class JobWitness:
                 self._tracers.move_to_end(job_id)
             return tracer
 
-    def record_io(self, *, job_id: str, request: Any, result: Any) -> None:
+    def record_io(
+        self,
+        *,
+        job_id: str,
+        request: Any,
+        result: Any,
+        started_at: str | None = None,
+        completed_at: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
         """Record the job's FULL input/output into galeed's llm_calls (the family
         LLM debugging view). One document per executed job:
 
@@ -176,6 +185,13 @@ class JobWitness:
                 messages=getattr(request, "messages", None),
                 output=getattr(result, "output", None),
                 error=getattr(result, "error", None),
+                # Token counts are also left in `detail` for the advanced view,
+                # but pass them explicitly: galeed stores usage as a first-class
+                # field, which is what makes cost aggregatable.
+                usage=getattr(result, "usage", None) or {},
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
                 metadata=detail,
                 emit_event=False,  # the job.* lifecycle events already mark the spine
             )
