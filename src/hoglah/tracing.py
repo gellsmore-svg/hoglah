@@ -195,5 +195,34 @@ class JobWitness:
                 metadata=detail,
                 emit_event=False,  # the job.* lifecycle events already mark the spine
             )
+        except TypeError:
+            # An older galeed in this environment does not accept the newer
+            # kwargs. Retry without them so lifecycle/IO capture still works,
+            # and say so at WARNING: this silently produced cost-free records
+            # once, and a metric that reads zero is worse than one that is
+            # absent.
+            logger.warning(
+                "galeed is older than this hoglah — recording llm_call without "
+                "usage/timing. Upgrade galeed to restore cost instrumentation.",
+            )
+            try:
+                record_llm_call(
+                    self._database(),
+                    call_id=job_id,
+                    trace_id=request_meta.get("trace_id") or job_id,
+                    session_id=request_meta.get("session_id") or "hoglah",
+                    source="hoglah",
+                    step_name=request_meta.get("step_name"),
+                    parent_call_id=getattr(request, "parent_job_id", None),
+                    model=getattr(request, "model", None),
+                    prompt=getattr(request, "prompt", None),
+                    messages=getattr(request, "messages", None),
+                    output=getattr(result, "output", None),
+                    error=getattr(result, "error", None),
+                    metadata=detail,  # usage still rides here for the old shape
+                    emit_event=False,
+                )
+            except Exception:
+                logger.debug("galeed llm_calls fallback failed (ignored)", exc_info=True)
         except Exception:
             logger.debug("galeed llm_calls record failed (ignored)", exc_info=True)

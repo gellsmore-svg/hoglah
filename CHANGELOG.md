@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Version-skew guard on the galeed llm_calls record: an older galeed that does
+  not accept `usage`/timing kwargs now falls back to the previous call shape and
+  **warns**, instead of raising a TypeError that the catch-all swallowed. That
+  failure mode produced records with zero cost and looked like the models were
+  free — a metric reading zero is worse than one that is absent.
 
 ### Fixed
 - `hoglah serve` now closes its client and SQLite handle on shutdown via a FastAPI
