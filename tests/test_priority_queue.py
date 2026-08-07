@@ -48,3 +48,26 @@ def test_different_keys_not_blocked() -> None:
     first = q._claim()  # claims one key
     second = q._claim()  # different key still eligible (not blocked)
     assert {first[4][0], second[4][0]} == {"x", "y"}
+
+
+def test_stats_counts_failures() -> None:
+    q = SessionPriorityQueue(workers=1)
+    done = threading.Event()
+
+    def boom():
+        try:
+            raise RuntimeError("expected failure")
+        finally:
+            done.set()
+
+    assert q.stats() == {"queued": 0, "busy_keys": 0, "failures": 0}
+    q.submit(boom, priority=1)
+    assert done.wait(timeout=2.0)
+    # Give the worker a moment to increment the counter after the exception.
+    for _ in range(40):
+        if q.stats()["failures"] >= 1:
+            break
+        time.sleep(0.05)
+    stats = q.stats()
+    assert stats["failures"] == 1
+    assert stats["queued"] == 0

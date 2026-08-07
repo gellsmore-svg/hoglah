@@ -43,6 +43,7 @@ class SessionPriorityQueue:
         self._seq = itertools.count()
         self._cond = threading.Condition()
         self._busy: set = set()  # keys with a task currently running
+        self._failures = 0  # tasks that raised (for stats / monitoring)
         for index in range(workers):
             threading.Thread(target=self._worker, name=f"hoglah-pq-{index}", daemon=True).start()
 
@@ -88,6 +89,8 @@ class SessionPriorityQueue:
             try:
                 fn(*args, **kwargs)
             except Exception:
+                with self._cond:
+                    self._failures += 1
                 logger.exception(
                     "SessionPriorityQueue task failed (key=%s, fn=%s)",
                     key, getattr(fn, "__name__", fn),
@@ -100,4 +103,8 @@ class SessionPriorityQueue:
 
     def stats(self) -> dict[str, int]:
         with self._cond:
-            return {"queued": len(self._heap), "busy_keys": len(self._busy)}
+            return {
+                "queued": len(self._heap),
+                "busy_keys": len(self._busy),
+                "failures": self._failures,
+            }
