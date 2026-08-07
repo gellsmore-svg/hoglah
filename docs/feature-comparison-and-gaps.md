@@ -2,7 +2,7 @@
 
 **Status:** living document  
 **Captured:** 2026-08-07  
-**Package baseline:** Hoglah **0.10.0**  
+**Package baseline:** Hoglah **0.10.1**  
 **Purpose:** Restart-friendly checklist for prioritising work against similar
 queueing / LLM-serving tools. Update this file when shipping features or
 revising scope.
@@ -108,6 +108,7 @@ Update checkboxes when verifying against code.
 | Failed-job DLQ + requeue | ✅ | `hoglah dlq` / `requeue`; store reset to QUEUED |
 | Per-model concurrency slots | ✅ | `model_slots` / `default_model_slots` under global concurrency |
 | Fairness / rate limits | ✅ | session/tag slots + token-bucket start rates |
+| Prometheus metrics | ✅ | `/metrics` + `hoglah metrics`; no extra dep |
 
 ---
 
@@ -142,6 +143,7 @@ Legend: **Y** yes · **P** partial · **N** no · **N/A** wrong layer
 | Continuous batching | **N** | N/A | N/A | N/A | N/A | P |
 | Horizontal workers + shared store | Y | Y | Y | Y | Y | Y |
 | Built-in monitor UI | Y | P | N | N | Flower | Y |
+| Prometheus metrics | **Y** | N | N | P | P | Y |
 | Safe stub for tests | **Y** | N | N | N | N | N |
 
 ---
@@ -175,7 +177,6 @@ When closing, move the row to §7 with date + version.
 |---|---|---|---|---|
 | G7 | Dependencies beyond parent_id | open | parent_id is lineage only | Minimal `depends_on: [job_ids]` or enqueue-child-on-complete |
 | G8 | Streaming results | open | Interactive UIs want tokens | SSE on serve or chunk files; keep store final |
-| G11 | Metrics export | open | Ops parity with Flower/Horizon | Prometheus counters (queue depth, latency, fail) |
 
 ### P2 — Nice-to-have / explicit non-goals
 
@@ -210,7 +211,8 @@ When closing, move the row to §7 with date + version.
 | G6 | Idempotent submit | 0.10.0 | 2026-08-07 | `idempotency_key` unique index. |
 | G9 | Failed-job DLQ + requeue | 0.10.0 | 2026-08-07 | `dlq` / `requeue`; FAILED→QUEUED. |
 | G10 | Per-model concurrency slots | 0.10.0 | 2026-08-07 | `model_slots` / `default_model_slots`; peer PROCESSING counted. |
-| G5 | Fairness / rate limits | unreleased (→0.10.1) | 2026-08-07 | session/tag concurrent slots + token-bucket rates; fair session order. |
+| G5 | Fairness / rate limits | 0.10.1 | 2026-08-07 | session/tag concurrent slots + token-bucket rates; fair session order. |
+| G11 | Prometheus metrics | 0.10.1 | 2026-08-07 | text exposition; gauges + counters + latency summary; CLI + /metrics. |
 
 ---
 
@@ -219,9 +221,8 @@ When closing, move the row to §7 with date + version.
 If resuming without further instruction, default order:
 
 1. **G7** Minimal depends_on  
-2. **G11** Prometheus metrics  
-3. **G8** Optional token streaming  
-4. **G4** Harder in-flight cancel (builds on G3 leases)  
+2. **G8** Optional token streaming  
+3. **G4** Harder in-flight cancel (builds on G3 leases)  
 
 Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 
@@ -260,6 +261,7 @@ Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 | 2026-08-07 | Grok CLI session | Closed G9 failed-job dlq + requeue. |
 | 2026-08-07 | Grok CLI session | Closed G10 model slots; cut 0.10.0. |
 | 2026-08-07 | Grok CLI session | Closed G5 session/tag fairness + rate limits. |
+| 2026-08-07 | Grok CLI session | Closed G11 Prometheus metrics. |
 
 ---
 

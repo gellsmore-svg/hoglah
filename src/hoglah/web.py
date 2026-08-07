@@ -12,7 +12,7 @@ submitting application) is driving.
 Security posture: bind to 127.0.0.1 by default. There is no auth; the
 operator runs it locally, browser on the same host. The UI is strictly
 read-only — maintenance actions stay in the CLI
-(`hoglah clear/rm/cancel/requeue/dlq`).
+(`hoglah clear/rm/cancel/requeue/dlq`). Prometheus scrape: ``GET /metrics``.
 
 Requires the ``web`` extra: ``pip install hoglah[web]``.
 """
@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .client import Hoglah
 from .models import JobResult, JobStatus
@@ -241,6 +241,11 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(404, f"job not found: {job_id}")
         return {"ok": True, "job": _result_to_dict(job)}
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    def prometheus_metrics() -> str:
+        """Prometheus scrape endpoint (gap G11). No auth — keep bind local."""
+        return client.metrics_text()
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request, status: str | None = None, limit: int = 25) -> str:

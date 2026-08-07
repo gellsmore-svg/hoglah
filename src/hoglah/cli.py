@@ -192,6 +192,22 @@ def stats(
     print(f"{'total':12} : {s['total_jobs']}")
 
 
+@app.command()
+def metrics(
+    db: Path | None = typer.Option(None, "--db", help="Override database path"),
+) -> None:
+    """Print Prometheus text metrics for the queue (gap G11).
+
+    Scrape with:  curl -s localhost:8781/metrics
+    or pipe this command into a node_exporter textfile collector.
+    """
+    h = _get_hoglah(db)
+    try:
+        print(h.metrics_text(), end="")
+    finally:
+        h.close()
+
+
 _MONITOR_STATUS_COLORS = {
     "queued": typer.colors.YELLOW,
     "processing": typer.colors.CYAN,

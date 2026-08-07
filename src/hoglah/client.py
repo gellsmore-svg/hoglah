@@ -34,6 +34,7 @@ from typing import Any
 from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
 from .dispatch import BackendPool
 from .config import HoglahConfig, HoglahSettings
+from .metrics import REGISTRY as _METRICS
 from .models import (
     JobCallback,
     JobRequest,
@@ -478,6 +479,7 @@ class Hoglah:
         job_id = self._store.enqueue(
             req, callback_key=callback_key, idempotency_key=idemp
         )
+        _METRICS.inc("hoglah_jobs_submitted_total")
         self._witness.emit(
             JOB_QUEUED,
             job_id=job_id,
@@ -639,6 +641,7 @@ class Hoglah:
             error="Cancelled by user",
         )
         self._store.set_result(job_id, result)
+        _METRICS.inc("hoglah_jobs_terminal_total", status="cancelled")
         self._witness.emit(
             JOB_CANCELLED,
             job_id=job_id,
@@ -764,6 +767,7 @@ class Hoglah:
                     reclaimed = self._store.reclaim_stale_leases(limit=20)
                     for rid in reclaimed:
                         logger.info("Reclaimed stale lease for job %s", rid)
+                        _METRICS.inc("hoglah_lease_reclaims_total")
                 except Exception:
                     logger.exception("Error reclaiming stale leases")
 
@@ -882,6 +886,7 @@ class Hoglah:
                 )
                 return
             terminal_row = self._store.get(job_id) or {}
+            self._record_terminal_metrics(result, row, terminal_row)
 
             failed = result.status == JobStatus.FAILED
             self._witness.emit(
@@ -1395,7 +1400,25 @@ class Hoglah:
         ok = self._store.requeue(job_id, from_statuses=allowed)
         if ok:
             logger.info("Requeued job %s", job_id)
+            _METRICS.inc("hoglah_job_requeues_total")
         return ok
+
+    def metrics_text(self) -> str:
+        """Prometheus text exposition (gap G11)."""
+        return _METRICS.render(self.stats())
+
+    def _record_terminal_metrics(
+        self,
+        result: JobResult,
+        start_row: dict[str, Any],
+        terminal_row: dict[str, Any],
+    ) -> None:
+        status = result.status.value if isinstance(result.status, JobStatus) else str(result.status)
+        if status in ("completed", "failed", "cancelled"):
+            _METRICS.inc("hoglah_jobs_terminal_total", status=status)
+        ms = self._elapsed_ms(start_row.get("updated_at"), terminal_row.get("updated_at"))
+        if ms is not None:
+            _METRICS.observe_seconds(ms / 1000.0)
 
     def requeue_failed(
         self,

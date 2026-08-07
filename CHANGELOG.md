@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-07
+
 ### Added
+- **Prometheus metrics (gap G11)** — zero-dep text exposition: gauges for queue
+  depth by status, counters for submit/terminal/requeue/lease reclaim, summary
+  of processing latency. `hoglah metrics` and `GET /metrics` on `hoglah serve`.
 - **Fairness / rate limits (gap G5)** — multi-agent GPU sharing: `session_slots`
   (concurrent per `metadata.session_id`), `tag_slots`, token-bucket
   `session_rate_per_minute` / `tag_rates_per_minute`. Worker prefers less-loaded
