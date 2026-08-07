@@ -113,6 +113,13 @@ Deduplicate agent retries with an idempotency key (same key → same job id):
 h.submit(prompt="…", model="gemma3:1b", idempotency_key="session-42/step-3")
 ```
 
+Run B only after A completes (`parent_job_id` is lineage; `depends_on` is execution):
+
+```python
+a = h.submit(prompt="step 1", model="gemma3:1b")
+b = h.submit(prompt="step 2", model="gemma3:1b", depends_on=[a], parent_job_id=a)
+```
+
 ### CLI
 
 ```bash

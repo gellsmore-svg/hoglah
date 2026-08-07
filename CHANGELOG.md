@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Minimal depends_on (gap G7)** — `submit(..., depends_on=[job_ids])` keeps a
+  job queued until every dependency is COMPLETED; fails immediately if any
+  dependency is FAILED/CANCELLED/missing. Distinct from `parent_job_id` (lineage
+  only). CLI: `--depends-on id1,id2`.
+
 ## [0.10.1] - 2026-08-07
 
 ### Added

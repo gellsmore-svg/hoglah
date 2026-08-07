@@ -363,6 +363,8 @@ class Hoglah:
         delay_seconds: float | int | None = None,
         # Idempotent submit (G6) — same key returns the existing job id
         idempotency_key: str | None = None,
+        # Execution deps (G7) — wait for these job ids to COMPLETE
+        depends_on: list[str] | None = None,
         # Generation params
         temperature: float | None = None,
         top_p: float | None = None,
@@ -398,6 +400,11 @@ class Hoglah:
             idempotency_key=str  — re-submit with the same key returns the
             existing job id (no second row). Useful for agent loops that may
             retry after a crash. Independent of messaging ``correlation_id``.
+
+        Dependencies (gap G7):
+            depends_on=[job_id, ...]  — stay queued until each listed job is
+            COMPLETED. If any dependency fails, is cancelled, or is missing,
+            this job fails without running. Distinct from parent_job_id (lineage).
         """
         if not model:
             raise ValueError("model is required")
@@ -455,6 +462,7 @@ class Hoglah:
             parent_job_id=parent_job_id,
             run_at=scheduled_run_at,
             idempotency_key=idemp,
+            depends_on=depends_on,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
@@ -514,6 +522,7 @@ class Hoglah:
         run_at: datetime | str | None = None,
         delay_seconds: float | int | None = None,
         idempotency_key: str | None = None,
+        depends_on: list[str] | None = None,
         **extra: Any,
     ) -> str:
         """Submit an embedding job. Returns the job ID immediately.
@@ -521,7 +530,7 @@ class Hoglah:
         Convenience wrapper over submit(kind="embed"): the input text is
         carried in `prompt` and the worker routes it to adapter.embed(); the
         resulting JobResult has `embedding` / `embedding_dim` set and `output`
-        is None. Accepts the same schedule, retry_policy, and idempotency_key
+        is None. Accepts the same schedule, retry, idempotency, and depends_on
         args as :meth:`submit`.
         """
         return self.submit(
@@ -540,6 +549,7 @@ class Hoglah:
             run_at=run_at,
             delay_seconds=delay_seconds,
             idempotency_key=idempotency_key,
+            depends_on=depends_on,
             **extra,
         )
 
@@ -792,6 +802,15 @@ class Hoglah:
                     # cancel() target the wrong task.
                     if job_id in self._inflight:
                         continue
+                    # G7: wait for depends_on, or fail if a dependency is dead.
+                    dep_state, dep_err = self._eval_depends_on(
+                        (row.get("request") or {}).get("depends_on")
+                    )
+                    if dep_state == "wait":
+                        continue
+                    if dep_state == "blocked":
+                        self._fail_blocked_dependency(job_id, dep_err or "dependency blocked")
+                        continue
                     # Reserve model/session/tag slots + rate tokens before the
                     # global semaphore (G5/G10).
                     if not self._try_reserve_job(job_id, row):
@@ -992,6 +1011,67 @@ class Hoglah:
                     return
         except asyncio.CancelledError:
             return
+
+    def _eval_depends_on(
+        self, depends_on: list[str] | None
+    ) -> tuple[str, str | None]:
+        """Return (ready|wait|blocked, error). Gap G7."""
+        if not depends_on:
+            return "ready", None
+        for dep_id in depends_on:
+            dep_id = str(dep_id).strip()
+            if not dep_id:
+                continue
+            row = self._store.get(dep_id)
+            if row is None:
+                return "blocked", f"dependency {dep_id} not found"
+            try:
+                st = JobStatus(row["status"])
+            except Exception:
+                return "blocked", f"dependency {dep_id} has invalid status"
+            if st in (JobStatus.QUEUED, JobStatus.PROCESSING):
+                return "wait", None
+            if st in (JobStatus.FAILED, JobStatus.CANCELLED):
+                return "blocked", f"dependency {dep_id} is {st.value}"
+            # COMPLETED → ok
+        return "ready", None
+
+    def _fail_blocked_dependency(self, job_id: str, error: str) -> None:
+        """Mark a still-queued job FAILED because a depends_on peer is dead."""
+        token = self._store.claim_for_processing(
+            job_id, lease_seconds=self.config.lease_seconds
+        )
+        if not token:
+            return
+        row = self._store.get(job_id) or {}
+        req = row.get("request") or {}
+        result = JobResult(
+            job_id=job_id,
+            status=JobStatus.FAILED,
+            model=req.get("model"),
+            error=error,
+            tags=req.get("tags") or [],
+            metadata=req.get("metadata") or {},
+            parent_job_id=req.get("parent_job_id"),
+            parameters={"depends_on": req.get("depends_on") or []},
+        )
+        wrote = self._store.set_result(job_id, result, lease_token=token)
+        if not wrote:
+            return
+        _METRICS.inc("hoglah_jobs_terminal_total", status="failed")
+        self._witness.emit(
+            JOB_FAILED,
+            job_id=job_id,
+            status="failed",
+            summary=f"job failed: {error[:120]}",
+            model=req.get("model"),
+        )
+        try:
+            request = JobRequest(**req) if req else None
+        except Exception:
+            request = None
+        self._deliver(result, request)
+        logger.info("Job %s failed (dependency): %s", job_id, error)
 
     def _fairness_enabled(self) -> bool:
         c = self.config

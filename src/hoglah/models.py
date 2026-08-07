@@ -296,6 +296,11 @@ class JobRequest:
     # same key returns the existing job id and does not create a new row.
     idempotency_key: str | None = None
 
+    # Execution dependencies (gap G7). The worker will not claim this job until
+    # every listed job is COMPLETED. If any dependency is FAILED/CANCELLED or
+    # missing, this job fails immediately. Distinct from parent_job_id (lineage).
+    depends_on: list[str] | None = None
+
     # Generation params (flattened for convenience; merged into options by worker if needed)
     temperature: float | None = None
     top_p: float | None = None
@@ -352,6 +357,13 @@ def normalize_request(**kwargs: Any) -> JobRequest:
     data = {k: v for k, v in kwargs.items() if k in known_fields and v is not None}
     if "retry_policy" in data and isinstance(data["retry_policy"], RetryPolicy):
         data["retry_policy"] = data["retry_policy"].to_dict()
+    if "depends_on" in data and data["depends_on"] is not None:
+        deps = data["depends_on"]
+        if isinstance(deps, str):
+            deps = [p.strip() for p in deps.split(",") if p.strip()]
+        else:
+            deps = [str(d).strip() for d in deps if str(d).strip()]
+        data["depends_on"] = deps or None
     return JobRequest(**data)
 
 

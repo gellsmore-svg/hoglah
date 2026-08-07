@@ -837,6 +837,11 @@ def submit(
         "--idempotency-key",
         help="If the same key was already submitted, return that job id (no duplicate)",
     ),
+    depends_on: str | None = typer.Option(
+        None,
+        "--depends-on",
+        help="Comma-separated job ids that must COMPLETE before this job runs (G7)",
+    ),
     # CLI control
     db: Path | None = typer.Option(None, "--db"),
     real: bool = typer.Option(False, "--real", help="Use real Ollama (requires server); default is safe stub"),
@@ -852,8 +857,10 @@ def submit(
         hoglah submit "..." --model x --metadata '{"source":"agent1"}' --parent-job-id abc-123
         hoglah submit "later" --model x --delay 60
         hoglah submit "nightly" --model x --run-at 2026-08-08T02:00:00Z
+        hoglah submit "step2" --model x --depends-on <job-id>
     """
     tag_list = [t.strip() for t in tags.split(",")] if tags else None
+    dep_list = [d.strip() for d in depends_on.split(",") if d.strip()] if depends_on else None
 
     # Parse messages if provided
     messages: list[dict[str, Any]] | None = None
@@ -938,6 +945,7 @@ def submit(
             max_retries=max_retries,
             retry_policy=policy_arg,
             idempotency_key=idempotency_key,
+            depends_on=dep_list,
         )
     except ValueError as e:
         typer.secho(f"Error: {e}", fg=typer.colors.RED)

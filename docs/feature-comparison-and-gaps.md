@@ -109,6 +109,7 @@ Update checkboxes when verifying against code.
 | Per-model concurrency slots | ✅ | `model_slots` / `default_model_slots` under global concurrency |
 | Fairness / rate limits | ✅ | session/tag slots + token-bucket start rates |
 | Prometheus metrics | ✅ | `/metrics` + `hoglah metrics`; no extra dep |
+| Minimal depends_on | ✅ | wait for COMPLETED; fail if dep dead; not a DAG engine |
 
 ---
 
@@ -131,7 +132,7 @@ Legend: **Y** yes · **P** partial · **N** no · **N/A** wrong layer
 | Delayed / scheduled / cron | **P** (delay/run_at; no cron) | P | Y | P | **Y** | P |
 | Rate limiting / quotas | **P** (session/tag slots + token bucket) | N | P | **Y** | Y | **Y** |
 | Unique / dedupe jobs | **Y** (`idempotency_key`) | N | P | P | P | P |
-| Chains / chords / DAG | **N** | N | P | P | **Y** | N |
+| Chains / chords / DAG | **P** (`depends_on` list only) | N | P | P | **Y** | N |
 | Dead-letter (broker poison) | Y | P | P | Y | Y | P |
 | Dead-letter (failed jobs UX) | **Y** (dlq + requeue) | P | P | P | P | P |
 | Multi-broker consume | **Y** | N | N | P | Y | N |
@@ -175,7 +176,6 @@ When closing, move the row to §7 with date + version.
 
 | ID | Gap | Status | Why it matters | Suggested cut |
 |---|---|---|---|---|
-| G7 | Dependencies beyond parent_id | open | parent_id is lineage only | Minimal `depends_on: [job_ids]` or enqueue-child-on-complete |
 | G8 | Streaming results | open | Interactive UIs want tokens | SSE on serve or chunk files; keep store final |
 
 ### P2 — Nice-to-have / explicit non-goals
@@ -195,7 +195,7 @@ When closing, move the row to §7 with date + version.
 |---|---|
 | Cancel by ID | Present (best-effort) |
 | max_retries / timeout / priority | Present |
-| parent_job_id chaining | Lineage yes; automatic dependency execution no |
+| parent_job_id chaining | Lineage yes; `depends_on` for execution wait (G7) |
 | Advanced multi-tenancy / auth | Non-goal |
 | Non-Ollama backends | Deferred |
 
@@ -213,6 +213,7 @@ When closing, move the row to §7 with date + version.
 | G10 | Per-model concurrency slots | 0.10.0 | 2026-08-07 | `model_slots` / `default_model_slots`; peer PROCESSING counted. |
 | G5 | Fairness / rate limits | 0.10.1 | 2026-08-07 | session/tag concurrent slots + token-bucket rates; fair session order. |
 | G11 | Prometheus metrics | 0.10.1 | 2026-08-07 | text exposition; gauges + counters + latency summary; CLI + /metrics. |
+| G7 | Minimal depends_on | unreleased (→0.10.2) | 2026-08-07 | `depends_on` list; wait COMPLETED; fail if dep FAILED/CANCELLED/missing. |
 
 ---
 
@@ -220,9 +221,8 @@ When closing, move the row to §7 with date + version.
 
 If resuming without further instruction, default order:
 
-1. **G7** Minimal depends_on  
-2. **G8** Optional token streaming  
-3. **G4** Harder in-flight cancel (builds on G3 leases)  
+1. **G8** Optional token streaming  
+2. **G4** Harder in-flight cancel (builds on G3 leases)  
 
 Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 
@@ -262,6 +262,7 @@ Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 | 2026-08-07 | Grok CLI session | Closed G10 model slots; cut 0.10.0. |
 | 2026-08-07 | Grok CLI session | Closed G5 session/tag fairness + rate limits. |
 | 2026-08-07 | Grok CLI session | Closed G11 Prometheus metrics. |
+| 2026-08-07 | Grok CLI session | Closed G7 minimal depends_on. |
 
 ---
 
