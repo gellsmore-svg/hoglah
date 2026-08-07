@@ -957,6 +957,16 @@ def run(
         help="Comma-separated Ollama servers to fan jobs across, least-loaded (e.g. http://gpu1:11434,http://gpu2:11434).",
     ),
     concurrency: int | None = typer.Option(None, "--concurrency", "-c"),
+    model_slots: str | None = typer.Option(
+        None,
+        "--model-slots",
+        help="Per-model concurrency caps, e.g. 'llama3.1:70b=1,gemma3:1b=2' (gap G10)",
+    ),
+    default_model_slots: int | None = typer.Option(
+        None,
+        "--default-model-slots",
+        help="Slot limit for models not listed in --model-slots",
+    ),
 ) -> None:
     """Run the background worker in the foreground (blocks until interrupted).
 
@@ -971,6 +981,10 @@ def run(
         cfg["ollama_host"] = ollama_host
     if ollama_hosts:
         cfg["ollama_hosts"] = [h.strip() for h in ollama_hosts.split(",") if h.strip()]
+    if model_slots is not None:
+        cfg["model_slots"] = model_slots
+    if default_model_slots is not None:
+        cfg["default_model_slots"] = default_model_slots
 
     h = Hoglah(config=cfg, use_real=real)
 

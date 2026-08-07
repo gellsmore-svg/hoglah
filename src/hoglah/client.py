@@ -239,6 +239,9 @@ class Hoglah:
         # event loop, so cancel() (called from the main thread) can interrupt a
         # running job cross-thread via loop.call_soon_threadsafe(task.cancel).
         self._inflight: dict[str, asyncio.Task] = {}
+        # model name reserved for each in-flight job (G10 slots; includes the
+        # window after task spawn but before claim_for_processing flips status).
+        self._inflight_models: dict[str, str] = {}
         self._worker_loop_ref: asyncio.AbstractEventLoop | None = None
 
         # Messaging bridge (Kafka ADR-018 / RabbitMQ ADR-019), created below only
@@ -729,10 +732,17 @@ class Hoglah:
                 except Exception:
                     logger.exception("Error reclaiming stale leases")
 
-                # Get a small batch of *due* queued jobs (priority + age order
-                # is handled by store). due_only skips delayed/scheduled jobs
-                # whose run_at is still in the future (G1).
-                queued = self._store.list(status=JobStatus.QUEUED, limit=10, due_only=True)
+                # Get a batch of *due* queued jobs (priority + age order is
+                # handled by store). due_only skips delayed/scheduled jobs
+                # whose run_at is still in the future (G1). Larger batch when
+                # per-model slots are on so a full model does not hide others.
+                slots_on = bool(self.config.model_slots) or (
+                    self.config.default_model_slots is not None
+                )
+                poll_limit = 50 if slots_on else 10
+                queued = self._store.list(
+                    status=JobStatus.QUEUED, limit=poll_limit, due_only=True
+                )
                 for row in queued:
                     if not self._worker_running:
                         break
@@ -744,11 +754,25 @@ class Hoglah:
                     # cancel() target the wrong task.
                     if job_id in self._inflight:
                         continue
-                    # Acquire slot and process (fire and forget the task)
-                    await sem.acquire()
+                    model = (row.get("request") or {}).get("model") or ""
+                    # Reserve the model slot before acquiring the global
+                    # semaphore so two poll iterations cannot oversubscribe a
+                    # model while one is blocked on sem.acquire (G10).
+                    if not self._try_reserve_model_slot(job_id, model):
+                        continue
+                    try:
+                        await sem.acquire()
+                    except Exception:
+                        self._inflight_models.pop(job_id, None)
+                        raise
                     task = asyncio.create_task(self._process_job(job_id, sem))
                     self._inflight[job_id] = task
-                    task.add_done_callback(lambda _t, jid=job_id: self._inflight.pop(jid, None))
+
+                    def _done(_t: asyncio.Task, jid: str = job_id) -> None:
+                        self._inflight.pop(jid, None)
+                        self._inflight_models.pop(jid, None)
+
+                    task.add_done_callback(_done)
 
                 await asyncio.sleep(poll_interval)
             except asyncio.CancelledError:
@@ -931,6 +955,44 @@ class Hoglah:
                     return
         except asyncio.CancelledError:
             return
+
+    def _slot_limit_for_model(self, model: str) -> int | None:
+        """Per-model max in-flight jobs, or None if unlimited (gap G10)."""
+        slots = self.config.model_slots or {}
+        if model in slots:
+            return int(slots[model])
+        return self.config.default_model_slots
+
+    def _model_usage(self, model: str) -> int:
+        """In-flight count for ``model`` (local reservations + peer PROCESSING)."""
+        local = sum(1 for m in self._inflight_models.values() if m == model)
+        peer = 0
+        try:
+            for row in self._store.list(status=JobStatus.PROCESSING, limit=200):
+                jid = row["id"]
+                if jid in self._inflight_models:
+                    continue
+                req = row.get("request") or {}
+                if req.get("model") == model:
+                    peer += 1
+        except Exception:
+            logger.exception("Failed counting PROCESSING jobs for model slots")
+        return local + peer
+
+    def _try_reserve_model_slot(self, job_id: str, model: str) -> bool:
+        """Atomically (in-process) reserve a model slot, or return False."""
+        limit = self._slot_limit_for_model(model)
+        if limit is None:
+            self._inflight_models[job_id] = model
+            return True
+        if self._model_usage(model) >= limit:
+            return False
+        self._inflight_models[job_id] = model
+        # Re-check after reserve in case a peer claim landed mid-check.
+        if self._model_usage(model) > limit:
+            self._inflight_models.pop(job_id, None)
+            return False
+        return True
 
     async def _execute_with_retries(self, job_id: str, request: JobRequest) -> JobResult:
         """Run the Ollama call under the job's RetryPolicy (gap G2).

@@ -2,7 +2,7 @@
 
 **Status:** living document  
 **Captured:** 2026-08-07  
-**Package baseline:** Hoglah **0.9.x**  
+**Package baseline:** Hoglah **0.10.0**  
 **Purpose:** Restart-friendly checklist for prioritising work against similar
 queueing / LLM-serving tools. Update this file when shipping features or
 revising scope.
@@ -14,7 +14,7 @@ revising scope.
 3. Move closed gaps to §7 “Closed”
 4. Bump “Last reviewed” and package baseline when done
 
-**Last reviewed:** 2026-08-07 (G1 + G2 + G3 + G6 + G9 closed)  
+**Last reviewed:** 2026-08-07 (G1–G3, G6, G9, G10 closed → 0.10.0)  
 **Next review trigger:** any release that changes queue semantics, scheduling,
 leases, rate limits, or multi-worker crash recovery
 
@@ -106,6 +106,7 @@ Update checkboxes when verifying against code.
 | Richer retry policy | ✅ | `RetryPolicy`; named classes; jittered exponential |
 | Idempotent submit | ✅ | `idempotency_key` unique index (≠ bridge correlation_id) |
 | Failed-job DLQ + requeue | ✅ | `hoglah dlq` / `requeue`; store reset to QUEUED |
+| Per-model concurrency slots | ✅ | `model_slots` / `default_model_slots` under global concurrency |
 
 ---
 
@@ -174,7 +175,6 @@ When closing, move the row to §7 with date + version.
 |---|---|---|---|---|
 | G7 | Dependencies beyond parent_id | open | parent_id is lineage only | Minimal `depends_on: [job_ids]` or enqueue-child-on-complete |
 | G8 | Streaming results | open | Interactive UIs want tokens | SSE on serve or chunk files; keep store final |
-| G10 | Per-model concurrency / slots | open | 70B vs 8B share one queue poorly | Slot table next to dispatch |
 | G11 | Metrics export | open | Ops parity with Flower/Horizon | Prometheus counters (queue depth, latency, fail) |
 
 ### P2 — Nice-to-have / explicit non-goals
@@ -204,11 +204,12 @@ When closing, move the row to §7 with date + version.
 
 | ID | Gap | Closed in version | Date | Notes |
 |---|---|---|---|---|
-| G1 | Delayed / scheduled jobs | unreleased (→0.10) | 2026-08-07 | `delay_seconds` / `run_at` on submit + embed; store `run_at` column + due-index; worker `due_only` + claim guard; CLI `--delay` / `--run-at`. No cron/recurrence. |
-| G2 | Richer retry policy | unreleased (→0.10) | 2026-08-07 | `RetryPolicy` + `submit(retry_policy=)`; classes include oom/timeout opt-in; jittered backoff; `max_retries=0` fix. |
-| G3 | PROCESSING lease + heartbeat | unreleased (→0.10) | 2026-08-07 | `lease_token` + `lease_expires_at`; heartbeat while running; `reclaim_stale_leases` on startup + poll; token-gated `set_result`. |
-| G6 | Idempotent submit | unreleased (→0.10) | 2026-08-07 | `idempotency_key` on submit/embed + CLI; unique index; find-before-insert + race-safe IntegrityError path. |
-| G9 | Failed-job DLQ + requeue | unreleased (→0.10) | 2026-08-07 | `dlq` / `requeue` CLI; `Hoglah.requeue`; FAILED→QUEUED clears result; web hint on failed detail. |
+| G1 | Delayed / scheduled jobs | 0.10.0 | 2026-08-07 | `delay_seconds` / `run_at`; due-index; CLI `--delay` / `--run-at`. |
+| G2 | Richer retry policy | 0.10.0 | 2026-08-07 | `RetryPolicy`; oom/timeout opt-in; `max_retries=0` fix. |
+| G3 | PROCESSING lease + heartbeat | 0.10.0 | 2026-08-07 | lease token + heartbeat; stale reclaim; token-gated complete. |
+| G6 | Idempotent submit | 0.10.0 | 2026-08-07 | `idempotency_key` unique index. |
+| G9 | Failed-job DLQ + requeue | 0.10.0 | 2026-08-07 | `dlq` / `requeue`; FAILED→QUEUED. |
+| G10 | Per-model concurrency slots | 0.10.0 | 2026-08-07 | `model_slots` / `default_model_slots`; peer PROCESSING counted. |
 
 ---
 
@@ -216,12 +217,11 @@ When closing, move the row to §7 with date + version.
 
 If resuming without further instruction, default order:
 
-1. **G10** Per-model concurrency slots  
-2. **G5** Fairness / rate limit  
-3. **G7** Minimal depends_on  
-4. **G11** Prometheus metrics  
-5. **G8** Optional token streaming  
-6. **G4** Harder in-flight cancel (builds on G3 leases)  
+1. **G5** Fairness / rate limit (token bucket per tag/session)  
+2. **G7** Minimal depends_on  
+3. **G11** Prometheus metrics  
+4. **G8** Optional token streaming  
+5. **G4** Harder in-flight cancel (builds on G3 leases)  
 
 Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 
@@ -258,6 +258,7 @@ Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 | 2026-08-07 | Grok CLI session | Closed G2 RetryPolicy (max/backoff/jitter/retry_on). |
 | 2026-08-07 | Grok CLI session | Closed G6 idempotency_key on submit. |
 | 2026-08-07 | Grok CLI session | Closed G9 failed-job dlq + requeue. |
+| 2026-08-07 | Grok CLI session | Closed G10 model slots; cut 0.10.0. |
 
 ---
 

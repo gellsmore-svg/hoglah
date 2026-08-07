@@ -18,6 +18,7 @@ multiple workers and machines when you point it at a shared backend.
 - **Durable and restart-safe** — jobs and results persist; interrupted jobs and
   undelivered callbacks are recovered on restart.
 - **Configurable concurrency** — default 1, tune for your hardware.
+- **Per-model slots** — e.g. one 70B job at a time while smaller models share.
 - **Lease-based multi-worker reclaim** — PROCESSING jobs hold a heartbeat lease;
   dead workers' jobs are requeued without clobbering live peers.
 - **Context-aware** — auto-detects a model's context window and reports truncation
@@ -129,6 +130,7 @@ hoglah dlq                        # list failed jobs (inference dead-letter view
 hoglah requeue <job-id>           # put a failed job back on the queue
 hoglah requeue --all-failed --yes
 hoglah run --real                 # run a foreground worker (dedicated processor)
+hoglah run --real -c 2 --model-slots 'llama3.1:70b=1,gemma3:1b=2'
 hoglah doctor --real              # diagnose setup, backend, transport, connectivity
 ```
 

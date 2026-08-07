@@ -7,65 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **Failed-job DLQ + requeue (gap G9)** — operator view of inference failures
-  (not messaging poison): `hoglah dlq`, `hoglah requeue <id>`,
-  `hoglah requeue --all-failed`. Library: `Hoglah.requeue` /
-  `requeue_failed`. Resets FAILED → QUEUED, clears result/lease so a worker
-  runs the original request again. Web failed filter already via status cards;
-  job detail shows a CLI requeue hint.
-- **Idempotent submit (gap G6)** — `submit(..., idempotency_key=…)` /
-  `submit_embedding` and CLI `--idempotency-key`. Re-submit with the same key
-  returns the existing job id (unique index on SQLite + Mongo); independent of
-  messaging `correlation_id`. Direct callbacks re-register on a hit.
-- **Richer retry policy (gap G2)** — `RetryPolicy(max_retries, base_delay,
-  backoff_factor, max_delay, jitter, retry_on)` on `submit` /
-  `submit_embedding` (or a plain dict). Named `retry_on` classes:
-  `transient` (default), `connection`, `timeout`, `rate_limit`, `server`,
-  `oom`, `all`, `none`. OOM is **not** retried by default; job-level
-  `timeout_seconds` stays terminal unless `timeout`/`all` is opted in
-  (ADR-011). Equal-jitter backoff; `max_retries=0` is truly one attempt
-  (fixes a prior falsy `or 2` bug). CLI: `--max-retries`, `--retry-on`,
-  `--retry-base-delay`, `--retry-max-delay`, `--retry-jitter`,
-  `--retry-policy JSON`.
-- **PROCESSING leases + heartbeat (gap G3)** — multi-worker safe reclaim of dead
-  workers. `claim_for_processing` returns a lease token and sets
-  `lease_expires_at`; the worker heartbeats while a job runs
-  (`lease_seconds` default 30, `heartbeat_interval_seconds` default 10).
-  `reclaim_stale_leases()` requeues only expired/missing leases (startup + each
-  poll). Token-gated `set_result(..., lease_token=)` prevents a late completer
-  from clobbering a reclaimed job. Cancel / legacy writes still unconditional.
-  Env: `HOGLAH_LEASE_SECONDS`, `HOGLAH_HEARTBEAT_INTERVAL_SECONDS`.
-- **Delayed / scheduled jobs (gap G1)** — `submit(..., delay_seconds=N)` or
-  `submit(..., run_at=datetime|ISO)` enqueues a job that stays `queued` until
-  due. The worker poll uses a due-index (`list(..., due_only=True)`); claim
-  refuses future `run_at` as a second guard. Same args on `submit_embedding`.
-  CLI: `hoglah submit … --delay 60` or `--run-at 2026-08-08T02:00:00Z`.
-  SQLite migrates a `run_at` column + `idx_jobs_due`; Mongo stores `run_at`
-  with a matching index. Pass at most one of the two schedule args.
+## [0.10.0] - 2026-08-07
 
-- Version-skew guard on the galeed llm_calls record: an older galeed that does
-  not accept `usage`/timing kwargs now falls back to the previous call shape and
-  **warns**, instead of raising a TypeError that the catch-all swallowed. That
-  failure mode produced records with zero cost and looked like the models were
-  free — a metric reading zero is worse than one that is absent.
+### Added
+- **Per-model concurrency slots (gap G10)** — `model_slots` /
+  `default_model_slots` (env `HOGLAH_MODEL_SLOTS=llama=1,gemma=2`) cap how many
+  jobs per model may run at once under the global concurrency ceiling. Worker
+  reserves a slot before claim; multi-worker counts peer PROCESSING rows.
+  CLI: `hoglah run --model-slots '70b=1,8b=2' --default-model-slots 1`.
+- **Failed-job DLQ + requeue (gap G9)** — `hoglah dlq`, `hoglah requeue`,
+  `Hoglah.requeue` / `requeue_failed`. FAILED → QUEUED with original request.
+- **Idempotent submit (gap G6)** — `idempotency_key` on submit/embed + CLI.
+- **Richer retry policy (gap G2)** — `RetryPolicy` (max/backoff/jitter/retry_on);
+  OOM opt-in; `max_retries=0` fix.
+- **PROCESSING leases + heartbeat (gap G3)** — multi-worker safe reclaim;
+  token-gated completion.
+- **Delayed / scheduled jobs (gap G1)** — `delay_seconds` / `run_at` + due-index.
 
 ### Fixed
-- `hoglah serve` now closes its client and SQLite handle on shutdown via a FastAPI
-  lifespan hook (#12) — the monitor leaked a connection on every uvicorn reload.
-- **Intermittent SIGSEGV in the test suite** (#13). `SQLiteJobStore.close()` freed
-  the sqlite3 connection without taking the lock every other query holds. Because
-  the store is opened `check_same_thread=False` and shared with background threads
-  (the worker, and kafka_bridge's fire-and-forget `hoglah-msg-pub-*` publishers),
-  closing could tear a running `execute` out from under the C extension. `close()`
-  now takes the lock and is idempotent; a late call after close raises a clean
-  `sqlite3.ProgrammingError`, which `_publish_now` already handles by leaving the
-  job for restart re-emit.
-- CLI commands no longer start a background worker they never use — only `wait`
-  and `submit --wait` ask for one, and both now close it. Prevents daemon-thread
-  accumulation when the CLI is driven in-process (CliRunner, embedding callers).
-- Tests that constructed `Hoglah` instances purely for a constructor side effect
-  now use the context manager, so no worker thread outlives the test.
+- Version-skew guard on galeed `llm_calls` when older galeed rejects usage kwargs.
+- `hoglah serve` closes client/store on shutdown via FastAPI lifespan (#12).
+- Intermittent SIGSEGV: `SQLiteJobStore.close()` under lock + idempotent (#13).
+- CLI no longer starts an unused background worker except for wait paths.
 
 ## [0.9.0] - 2026-07-10
 

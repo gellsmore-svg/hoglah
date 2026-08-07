@@ -182,6 +182,21 @@ class HoglahSettings(BaseSettings):
         "Should be well under lease_seconds (defaults: 10s heartbeat, 30s lease).",
     )
 
+    # Per-model concurrency slots (gap G10). Global ``concurrency`` is still the
+    # hard ceiling; these caps prevent e.g. two 70B jobs from loading at once
+    # while smaller models may share remaining capacity.
+    # Env: HOGLAH_MODEL_SLOTS=llama3.1:70b=1,gemma3:1b=2
+    model_slots: dict[str, int] = Field(
+        default_factory=dict,
+        description="Max concurrent PROCESSING jobs per model name. Empty = no "
+        "per-model limit (only the global concurrency semaphore applies).",
+    )
+    default_model_slots: int | None = Field(
+        default=None,
+        ge=1,
+        description="Slot limit for models not listed in model_slots. None = unlimited.",
+    )
+
     # Ollama connection
     ollama_host: str | None = Field(
         default=None,
@@ -278,6 +293,45 @@ class HoglahSettings(BaseSettings):
             return [h.strip() for h in v.split(",") if h.strip()]
         return v
 
+    @field_validator("model_slots", mode="before")
+    @classmethod
+    def _parse_model_slots(cls, v: Any) -> Any:
+        """Accept dict or ``name=n,name=n`` / JSON object strings from env."""
+        if v is None or v == "":
+            return {}
+        if isinstance(v, dict):
+            return {str(k): int(val) for k, val in v.items()}
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return {}
+            if s.startswith("{"):
+                import json
+
+                parsed = json.loads(s)
+                if not isinstance(parsed, dict):
+                    raise ValueError("model_slots JSON must be an object")
+                return {str(k): int(val) for k, val in parsed.items()}
+            out: dict[str, int] = {}
+            for part in s.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "=" not in part:
+                    raise ValueError(
+                        f"model_slots entry {part!r} must be model=N (e.g. gemma3:1b=2)"
+                    )
+                name, _, num = part.partition("=")
+                name = name.strip()
+                if not name:
+                    raise ValueError("model_slots entry has empty model name")
+                n = int(num.strip())
+                if n < 1:
+                    raise ValueError(f"model_slots for {name!r} must be >= 1")
+                out[name] = n
+            return out
+        return v
+
     def ensure_dirs(self) -> None:
         """Create parent directory for db_path (and output_dir if set)."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,6 +352,8 @@ class HoglahSettings(BaseSettings):
             "concurrency": self.concurrency,
             "lease_seconds": self.lease_seconds,
             "heartbeat_interval_seconds": self.heartbeat_interval_seconds,
+            "model_slots": dict(self.model_slots),
+            "default_model_slots": self.default_model_slots,
             "ollama_host": self.ollama_host,
             "ollama_hosts": list(self.ollama_hosts),
             "output_dir": str(self.output_dir) if self.output_dir else None,
