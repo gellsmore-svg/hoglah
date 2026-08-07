@@ -626,13 +626,12 @@ class Hoglah:
         return JobStatus(row["status"])
 
     def cancel(self, job_id: str) -> bool:
-        """Cancel a job. If it is currently running in this process's worker,
-        the in-flight generation is interrupted (cross-thread task cancel);
-        otherwise it is simply marked CANCELLED before it starts.
+        """Cancel a job — queued or in-flight (gap G4).
 
-        The CANCELLED result is recorded first, so even if the running task
-        finishes a hair before the interrupt lands, _process_job's race guard
-        refuses to overwrite the cancellation.
+        Writes CANCELLED to the store first (clears any PROCESSING lease), then
+        interrupts a local in-flight task if this process owns it. Workers on
+        other machines notice via the cancel-watch / failed heartbeat and abort
+        their task without overwriting the CANCELLED result.
         """
         row = self._store.get(job_id)
         if row is None:
@@ -642,13 +641,18 @@ class Hoglah:
         if current in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
             return False
 
+        was_processing = current == JobStatus.PROCESSING
         self._store.update_status(job_id, JobStatus.CANCELLED)
-        # Synthesize a cancelled result so get() returns something useful
+        # Unconditional set_result also clears lease_token / lease_expires_at
+        # so reclaim will not revive this job as QUEUED.
         result = JobResult(
             job_id=job_id,
             status=JobStatus.CANCELLED,
             model=row.get("request", {}).get("model"),
-            error="Cancelled by user",
+            error="Cancelled by user" + (" (in-flight)" if was_processing else ""),
+            tags=(row.get("request") or {}).get("tags") or [],
+            metadata=(row.get("request") or {}).get("metadata") or {},
+            parent_job_id=(row.get("request") or {}).get("parent_job_id"),
         )
         self._store.set_result(job_id, result)
         _METRICS.inc("hoglah_jobs_terminal_total", status="cancelled")
@@ -662,16 +666,23 @@ class Hoglah:
         )
         self._deliver(result)
 
-        # If the job is executing in our worker, interrupt it on the worker's
-        # loop (cancel() runs on the main thread; the task lives on another).
+        # Local interrupt (same process). Remote workers rely on cancel-watch.
+        self._interrupt_local_job(job_id)
+        return True
+
+    def _interrupt_local_job(self, job_id: str) -> None:
+        """Best-effort cancel of an in-flight asyncio task on this worker."""
         task = self._inflight.get(job_id)
         loop = self._worker_loop_ref
-        if task is not None and loop is not None and not task.done():
-            try:
-                loop.call_soon_threadsafe(task.cancel)
-            except RuntimeError:
-                pass  # worker loop already stopping; CANCELLED result still stands
-        return True
+        if task is None or task.done():
+            return
+        if loop is None:
+            task.cancel()
+            return
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            pass
 
     def wait(self, job_id: str, timeout: float | None = None) -> JobResult:
         """Block until the job reaches a terminal state or timeout.
@@ -854,6 +865,7 @@ class Hoglah:
         """Claim and execute one job. Release semaphore on exit."""
         lease_token: str | None = None
         hb_task: asyncio.Task | None = None
+        cancel_watch: asyncio.Task | None = None
         try:
             lease_token = self._store.claim_for_processing(
                 job_id, lease_seconds=self.config.lease_seconds
@@ -865,13 +877,22 @@ class Hoglah:
             if not row:
                 return
 
+            # Cancelled between pick and claim (or claim lost a race with cancel).
+            if JobStatus(row["status"]) == JobStatus.CANCELLED:
+                return
+
             request = JobRequest(**row.get("request", {}))
             callback_key = row.get("callback_key")
 
-            # Heartbeat loop keeps the lease alive while we run (G3).
+            # Heartbeat keeps the lease alive (G3). Cancel-watch aborts the
+            # task when another process marks CANCELLED (G4).
             hb_task = asyncio.create_task(
                 self._heartbeat_loop(job_id, lease_token),
                 name=f"hoglah-hb-{job_id[:8]}",
+            )
+            cancel_watch = asyncio.create_task(
+                self._cancel_watch_loop(job_id),
+                name=f"hoglah-cw-{job_id[:8]}",
             )
 
             self._witness.emit(
@@ -980,10 +1001,12 @@ class Hoglah:
             except Exception:
                 pass
         finally:
-            if hb_task is not None:
-                hb_task.cancel()
+            for side in (hb_task, cancel_watch):
+                if side is None:
+                    continue
+                side.cancel()
                 try:
-                    await hb_task
+                    await side
                 except asyncio.CancelledError:
                     pass
                 except Exception:
@@ -1004,10 +1027,37 @@ class Hoglah:
                     job_id, lease_token, lease_seconds=self.config.lease_seconds
                 )
                 if not ok:
+                    # Lease lost — often because cancel() cleared it (G4).
                     logger.warning(
                         "Lost lease on job %s during heartbeat; stopping heartbeat",
                         job_id,
                     )
+                    self._interrupt_local_job(job_id)
+                    return
+        except asyncio.CancelledError:
+            return
+
+    async def _cancel_watch_loop(self, job_id: str) -> None:
+        """Watch store status and abort local work if CANCELLED (gap G4).
+
+        Covers cross-process cancel: another client writes CANCELLED; this
+        worker's long Ollama call is interrupted via task.cancel.
+        """
+        try:
+            while True:
+                await asyncio.sleep(0.25)
+                row = self._store.get(job_id)
+                if row is None:
+                    return
+                try:
+                    st = JobStatus(row["status"])
+                except Exception:
+                    continue
+                if st == JobStatus.CANCELLED:
+                    logger.info("Cancel watch: job %s is CANCELLED; interrupting", job_id)
+                    self._interrupt_local_job(job_id)
+                    return
+                if st in (JobStatus.COMPLETED, JobStatus.FAILED):
                     return
         except asyncio.CancelledError:
             return

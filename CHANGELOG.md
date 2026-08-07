@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-08-07
+
 ### Added
+- **Harder in-flight cancel (gap G4)** — cancel-watch polls store status every
+  250ms and aborts the local asyncio task when CANCELLED (cross-process cancel
+  without sharing the task handle). Heartbeat loss also interrupts. Cancel
+  clears the PROCESSING lease so reclaim cannot revive the job. In-flight
+  cancels record ``Cancelled by user (in-flight)``.
 - **Minimal depends_on (gap G7)** — `submit(..., depends_on=[job_ids])` keeps a
   job queued until every dependency is COMPLETED; fails immediately if any
   dependency is FAILED/CANCELLED/missing. Distinct from `parent_job_id` (lineage

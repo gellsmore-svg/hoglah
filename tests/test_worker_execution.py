@@ -626,7 +626,7 @@ def test_cancel_interrupts_in_flight_job():
 
         res = h.get(jid)
         assert res.status == JobStatus.CANCELLED
-        assert res.error == "Cancelled by user"
+        assert "Cancelled by user" in (res.error or "")
         # The slow run was interrupted before its 5s sleep finished.
         assert completed["flag"] is False
     finally:
@@ -657,9 +657,53 @@ def test_cancel_wins_over_a_failing_job():
         time.sleep(0.6)
         res = h.get(jid)
         assert res.status == JobStatus.CANCELLED
-        assert res.error == "Cancelled by user"
+        assert "Cancelled by user" in (res.error or "")
     finally:
         h.close()
+
+
+def test_cancel_via_store_interrupts_other_worker_inflight():
+    """G4: cancel written by another client (store only) is noticed by the
+    running worker's cancel-watch without that client holding the task ref."""
+    import time
+
+    finished = {"ok": False}
+
+    class SlowAdapter(StubAdapter):
+        async def run(self, request):
+            await asyncio.sleep(8)
+            finished["ok"] = True
+            return await super().run(request)
+
+    db = _temp_db()
+    worker = Hoglah(
+        config={"db_path": db, "heartbeat_interval_seconds": 0.5, "lease_seconds": 10},
+        adapter=SlowAdapter(),
+        start_worker=True,
+    )
+    try:
+        jid = worker.submit(prompt="hi", model="stub", max_retries=0)
+        deadline = time.time() + 6
+        while worker.get(jid).status != JobStatus.PROCESSING:
+            if time.time() > deadline:
+                raise AssertionError("never PROCESSING")
+            time.sleep(0.05)
+
+        # Simulate a pure-submitter process: no access to worker._inflight.
+        peer = Hoglah(config={"db_path": db}, start_worker=False)
+        assert peer.cancel(jid) is True
+        peer.close()
+
+        deadline = time.time() + 4
+        while time.time() < deadline:
+            if worker.get(jid).status == JobStatus.CANCELLED:
+                break
+            time.sleep(0.05)
+        res = worker.get(jid)
+        assert res.status == JobStatus.CANCELLED
+        assert finished["ok"] is False
+    finally:
+        worker.close()
 
 
 def test_callback_ssrf_guard_blocks_private_when_disabled(tmp_path):

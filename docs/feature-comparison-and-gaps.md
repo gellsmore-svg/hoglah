@@ -2,7 +2,7 @@
 
 **Status:** living document  
 **Captured:** 2026-08-07  
-**Package baseline:** Hoglah **0.10.1**  
+**Package baseline:** Hoglah **0.10.2**  
 **Purpose:** Restart-friendly checklist for prioritising work against similar
 queueing / LLM-serving tools. Update this file when shipping features or
 revising scope.
@@ -110,6 +110,7 @@ Update checkboxes when verifying against code.
 | Fairness / rate limits | ✅ | session/tag slots + token-bucket start rates |
 | Prometheus metrics | ✅ | `/metrics` + `hoglah metrics`; no extra dep |
 | Minimal depends_on | ✅ | wait for COMPLETED; fail if dep dead; not a DAG engine |
+| Harder in-flight cancel | ✅ | cancel-watch + lease clear; cross-process via store |
 
 ---
 
@@ -127,7 +128,7 @@ Legend: **Y** yes · **P** partial · **N** no · **N/A** wrong layer
 | Priority | Y | P | Y | Y | Y | P |
 | Retries + backoff | **Y** (policy object) | P | Y | **Y** | Y | Y |
 | Per-job timeout | Y | Y | Y | Y | Y | Y |
-| Cancel in-flight | P | P | P | P | P | P |
+| Cancel in-flight | **Y** (local + store watch) | P | P | P | P | P |
 | Worker lease / reclaim | **Y** | N | P | Y | P | N |
 | Delayed / scheduled / cron | **P** (delay/run_at; no cron) | P | Y | P | **Y** | P |
 | Rate limiting / quotas | **P** (session/tag slots + token bucket) | N | P | **Y** | Y | **Y** |
@@ -170,7 +171,7 @@ When closing, move the row to §7 with date + version.
 
 | ID | Gap | Status | Why it matters | Suggested cut |
 |---|---|---|---|---|
-| G4 | Harder in-flight cancel | open | Cancel often only affects queued | Coordinate with lease + adapter cancel |
+| — | *(none open in P0)* | — | — | — |
 
 ### P1 — Production local estate
 
@@ -193,7 +194,7 @@ When closing, move the row to §7 with date + version.
 
 | Spec item | Status |
 |---|---|
-| Cancel by ID | Present (best-effort) |
+| Cancel by ID | Present (queued + in-flight; cross-process via store) |
 | max_retries / timeout / priority | Present |
 | parent_job_id chaining | Lineage yes; `depends_on` for execution wait (G7) |
 | Advanced multi-tenancy / auth | Non-goal |
@@ -213,7 +214,8 @@ When closing, move the row to §7 with date + version.
 | G10 | Per-model concurrency slots | 0.10.0 | 2026-08-07 | `model_slots` / `default_model_slots`; peer PROCESSING counted. |
 | G5 | Fairness / rate limits | 0.10.1 | 2026-08-07 | session/tag concurrent slots + token-bucket rates; fair session order. |
 | G11 | Prometheus metrics | 0.10.1 | 2026-08-07 | text exposition; gauges + counters + latency summary; CLI + /metrics. |
-| G7 | Minimal depends_on | unreleased (→0.10.2) | 2026-08-07 | `depends_on` list; wait COMPLETED; fail if dep FAILED/CANCELLED/missing. |
+| G7 | Minimal depends_on | 0.10.2 | 2026-08-07 | `depends_on` list; wait COMPLETED; fail if dep FAILED/CANCELLED/missing. |
+| G4 | Harder in-flight cancel | 0.10.2 | 2026-08-07 | cancel-watch 250ms; cross-process store cancel; lease clear on cancel. |
 
 ---
 
@@ -221,8 +223,9 @@ When closing, move the row to §7 with date + version.
 
 If resuming without further instruction, default order:
 
-1. **G8** Optional token streaming  
-2. **G4** Harder in-flight cancel (builds on G3 leases)  
+1. **G8** Optional token streaming (SSE / chunk files; store stays final)  
+
+Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah (see also below).
 
 Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 
@@ -263,6 +266,7 @@ Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 | 2026-08-07 | Grok CLI session | Closed G5 session/tag fairness + rate limits. |
 | 2026-08-07 | Grok CLI session | Closed G11 Prometheus metrics. |
 | 2026-08-07 | Grok CLI session | Closed G7 minimal depends_on. |
+| 2026-08-07 | Grok CLI session | Closed G4 harder in-flight cancel. |
 
 ---
 

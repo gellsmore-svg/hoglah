@@ -60,6 +60,15 @@ class BaseAdapter(ABC):
         """Return details for a specific model (from ollama show or stub). Default empty."""
         return {}
 
+    async def abort(self) -> None:
+        """Best-effort abort of in-flight generation (gap G4).
+
+        Default no-op. Real adapters may close a stream or cancel a client
+        request; cooperative cancellation via asyncio task cancel is the
+        primary path used by the worker.
+        """
+        return None
+
 
 class StubAdapter(BaseAdapter):
     """
