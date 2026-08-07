@@ -357,6 +357,15 @@ actionable, include:
 **Security issues:** please report privately — see [SECURITY.md](SECURITY.md) —
 rather than opening a public issue.
 
+## Feature comparison & gaps
+
+Living checklist of Hoglah vs similar queues (RQ, Celery, Dramatiq, LLM
+gateways, …) and prioritised open gaps:
+
+- [`docs/feature-comparison-and-gaps.md`](docs/feature-comparison-and-gaps.md)
+
+Update that file when shipping queue features or re-prioritising work.
+
 ## Knowledge bundle
 
 A machine- and human-readable knowledge map of Hoglah's concepts, modules, and CLI
