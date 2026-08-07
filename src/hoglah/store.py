@@ -18,8 +18,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -28,6 +29,17 @@ from .models import JobRequest, JobResult, JobStatus, new_job_id
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _lease_expiry_iso(lease_seconds: float, *, now: datetime | None = None) -> str:
+    base = now or datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    return (base + timedelta(seconds=float(lease_seconds))).astimezone(timezone.utc).isoformat()
+
+
+def _new_lease_token() -> str:
+    return uuid.uuid4().hex
 
 
 @runtime_checkable
@@ -46,6 +58,7 @@ class JobStore(Protocol):
         job_id: str | None = None,
         callback_key: str | None = None,
         correlation_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> str:
         """Persist a new job and return its ID. Status starts as QUEUED.
 
@@ -54,7 +67,14 @@ class JobStore(Protocol):
         no-op that returns the existing job's id. This is what makes the Kafka
         bridge's at-least-once redelivery safe (ADR-018) — a message redelivered
         after a crash never creates a duplicate job.
+
+        ``idempotency_key`` (gap G6) is the same idea for the client submit API
+        (agent loops); it is independent of ``correlation_id``.
         """
+        ...
+
+    def find_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        """Return the job row for an idempotency key, or None."""
         ...
 
     def get(self, job_id: str) -> dict[str, Any] | None:
@@ -69,8 +89,14 @@ class JobStore(Protocol):
         parent_job_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        due_only: bool = False,
     ) -> list[dict[str, Any]]:
-        """List jobs with simple filters."""
+        """List jobs with simple filters.
+
+        When ``due_only`` is True, only return jobs whose ``run_at`` is null or
+        in the past (ready for a worker to claim). Used by the worker poll loop
+        so delayed/scheduled jobs stay QUEUED without being claimed early.
+        """
         ...
 
     def update_status(
@@ -83,15 +109,53 @@ class JobStore(Protocol):
         """Update the status (and optionally error) of a job."""
         ...
 
-    def set_result(self, job_id: str, result: JobResult) -> None:
-        """Store the final JobResult for a completed/failed/cancelled job."""
+    def set_result(
+        self,
+        job_id: str,
+        result: JobResult,
+        *,
+        lease_token: str | None = None,
+    ) -> bool:
+        """Store the final JobResult for a completed/failed/cancelled job.
+
+        When ``lease_token`` is set (worker completion path, G3), the write
+        succeeds only if the job is still PROCESSING under that token — so a
+        reclaimed job cannot be completed by a dead worker that lost the race.
+        Without a token the write is unconditional (cancel / tests / legacy).
+        Returns True if a row was updated.
+        """
         ...
 
-    def claim_for_processing(self, job_id: str) -> bool:
-        """Best-effort atomic transition QUEUED -> PROCESSING.
+    def claim_for_processing(
+        self,
+        job_id: str,
+        *,
+        lease_seconds: float = 30.0,
+    ) -> str | None:
+        """Atomic QUEUED -> PROCESSING with a lease (G3).
 
-        Returns True if the transition succeeded (this worker owns the job).
-        Used by the future worker loop.
+        Returns a lease token on success (this worker owns the job), or None if
+        the claim failed. A job with ``run_at`` in the future is not claimable
+        (G1 delay). The lease must be extended via :meth:`heartbeat` or it
+        becomes reclaimable by :meth:`reclaim_stale_leases`.
+        """
+        ...
+
+    def heartbeat(
+        self,
+        job_id: str,
+        lease_token: str,
+        *,
+        lease_seconds: float = 30.0,
+    ) -> bool:
+        """Extend the PROCESSING lease if ``lease_token`` still owns the job."""
+        ...
+
+    def reclaim_stale_leases(self, *, limit: int = 50) -> list[str]:
+        """Requeue PROCESSING jobs whose lease has expired (or is missing).
+
+        Returns the job ids that were requeued. Safe for multi-worker: live
+        jobs with a future ``lease_expires_at`` are left alone.
         """
         ...
 
@@ -132,7 +196,7 @@ class JobStore(Protocol):
 class SQLiteJobStore:
     """SQLite-backed JobStore (default implementation).
 
-    Schema (simple for V1):
+    Schema (simple for V1; columns added via migration when missing):
         jobs(
             id TEXT PRIMARY KEY,
             status TEXT,
@@ -143,7 +207,12 @@ class SQLiteJobStore:
             result_json TEXT,       -- JobResult when terminal
             error TEXT,
             callback_key TEXT,
-            tags_json TEXT
+            tags_json TEXT,
+            correlation_id TEXT,
+            result_published INTEGER,
+            run_at TEXT,            -- ISO UTC; null = due immediately (G1)
+            lease_expires_at TEXT,  -- ISO UTC; PROCESSING lease end (G3)
+            lease_token TEXT        -- owner token for heartbeat / complete (G3)
         )
     """
 
@@ -199,14 +268,38 @@ class SQLiteJobStore:
                 self._conn.execute(
                     "ALTER TABLE jobs ADD COLUMN result_published INTEGER NOT NULL DEFAULT 0"
                 )
+            if "run_at" not in existing_cols:
+                # G1 delayed/scheduled jobs. NULL means "due immediately".
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN run_at TEXT")
+            if "lease_expires_at" not in existing_cols:
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN lease_expires_at TEXT")
+            if "lease_token" not in existing_cols:
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN lease_token TEXT")
+            if "idempotency_key" not in existing_cols:
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN idempotency_key TEXT")
             # Helpful indexes for common queries
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority DESC, created_at)")
+            # Due-index for the worker poll: QUEUED + (run_at null or past) + priority.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_due "
+                "ON jobs(status, run_at, priority DESC, created_at)"
+            )
+            # Stale-lease reclaim: PROCESSING rows ordered by lease expiry.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_lease "
+                "ON jobs(status, lease_expires_at)"
+            )
             # UNIQUE on correlation_id (when present) gives idempotent enqueue:
             # a redelivered Kafka message can never create a second job.
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_correlation "
                 "ON jobs(correlation_id) WHERE correlation_id IS NOT NULL"
+            )
+            # Client-side idempotent submit (G6), independent of correlation_id.
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency "
+                "ON jobs(idempotency_key) WHERE idempotency_key IS NOT NULL"
             )
             self._conn.commit()
 
@@ -230,19 +323,28 @@ class SQLiteJobStore:
         job_id: str | None = None,
         callback_key: str | None = None,
         correlation_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> str:
         if job_id is None:
             job_id = new_job_id()
 
         now = _now_iso()
         tags = request.tags or []
+        if idempotency_key is None:
+            idempotency_key = getattr(request, "idempotency_key", None)
 
         with self._lock:
-            # Idempotency: if this correlation_id is already enqueued, return the
-            # existing job's id without inserting (the Kafka redelivery case).
+            # Messaging-bridge idempotency (ADR-018).
             if correlation_id is not None:
                 row = self._conn.execute(
                     "SELECT id FROM jobs WHERE correlation_id = ?", (correlation_id,)
+                ).fetchone()
+                if row is not None:
+                    return row["id"]
+            # Client submit idempotency (G6).
+            if idempotency_key is not None:
+                row = self._conn.execute(
+                    "SELECT id FROM jobs WHERE idempotency_key = ?", (idempotency_key,)
                 ).fetchone()
                 if row is not None:
                     return row["id"]
@@ -252,8 +354,8 @@ class SQLiteJobStore:
                     INSERT INTO jobs (
                         id, status, priority, created_at, updated_at,
                         request_json, result_json, error, callback_key, tags_json,
-                        correlation_id, result_published
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0)
+                        correlation_id, result_published, run_at, idempotency_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0, ?, ?)
                     """,
                     (
                         job_id,
@@ -265,21 +367,36 @@ class SQLiteJobStore:
                         callback_key,
                         json.dumps(tags),
                         correlation_id,
+                        request.run_at,
+                        idempotency_key,
                     ),
                 )
                 self._conn.commit()
             except sqlite3.IntegrityError:
-                # Lost a race on the UNIQUE(correlation_id) index (another
-                # thread/process inserted the same correlation_id concurrently).
-                # The other insert won; return its id — still exactly one job.
+                # Lost a race on UNIQUE(correlation_id) or UNIQUE(idempotency_key).
                 self._conn.rollback()
-                row = self._conn.execute(
-                    "SELECT id FROM jobs WHERE correlation_id = ?", (correlation_id,)
-                ).fetchone()
-                if row is not None:
-                    return row["id"]
+                if correlation_id is not None:
+                    row = self._conn.execute(
+                        "SELECT id FROM jobs WHERE correlation_id = ?", (correlation_id,)
+                    ).fetchone()
+                    if row is not None:
+                        return row["id"]
+                if idempotency_key is not None:
+                    row = self._conn.execute(
+                        "SELECT id FROM jobs WHERE idempotency_key = ?",
+                        (idempotency_key,),
+                    ).fetchone()
+                    if row is not None:
+                        return row["id"]
                 raise
         return job_id
+
+    def find_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM jobs WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+        return self._row_to_dict(row)
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -296,6 +413,7 @@ class SQLiteJobStore:
         parent_job_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        due_only: bool = False,
     ) -> list[dict[str, Any]]:
         query = "SELECT * FROM jobs"
         params: list[Any] = []
@@ -315,6 +433,12 @@ class SQLiteJobStore:
             # Crude JSON contains for parent in request_json (consistent with tags)
             where_clauses.append("request_json LIKE ?")
             params.append(f'%"parent_job_id": "{parent_job_id}"%')
+
+        if due_only:
+            # ISO-8601 UTC strings compare lexicographically in chronological order
+            # when produced by datetime.isoformat() (our only writer).
+            where_clauses.append("(run_at IS NULL OR run_at <= ?)")
+            params.append(_now_iso())
 
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
@@ -341,43 +465,142 @@ class SQLiteJobStore:
             )
             self._conn.commit()
 
-    def set_result(self, job_id: str, result: JobResult) -> None:
+    def set_result(
+        self,
+        job_id: str,
+        result: JobResult,
+        *,
+        lease_token: str | None = None,
+    ) -> bool:
         now = _now_iso()
-        # Also update status from the result
+        payload = json.dumps(asdict(result), default=str)
         with self._lock:
-            self._conn.execute(
-                """
-                UPDATE jobs
-                SET status = ?, result_json = ?, updated_at = ?, error = ?
-                WHERE id = ?
-                """,
-                (
-                    result.status.value,
-                    json.dumps(asdict(result), default=str),
-                    now,
-                    result.error,
-                    job_id,
-                ),
-            )
+            if lease_token is not None:
+                # Worker completion (G3): only if we still own the PROCESSING lease.
+                cur = self._conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, result_json = ?, updated_at = ?, error = ?,
+                        lease_expires_at = NULL, lease_token = NULL
+                    WHERE id = ? AND status = ? AND lease_token = ?
+                    """,
+                    (
+                        result.status.value,
+                        payload,
+                        now,
+                        result.error,
+                        job_id,
+                        JobStatus.PROCESSING.value,
+                        lease_token,
+                    ),
+                )
+            else:
+                cur = self._conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, result_json = ?, updated_at = ?, error = ?,
+                        lease_expires_at = NULL, lease_token = NULL
+                    WHERE id = ?
+                    """,
+                    (result.status.value, payload, now, result.error, job_id),
+                )
             self._conn.commit()
+        return cur.rowcount > 0
 
-    def claim_for_processing(self, job_id: str) -> bool:
-        """Attempt to move QUEUED -> PROCESSING atomically.
+    def claim_for_processing(
+        self,
+        job_id: str,
+        *,
+        lease_seconds: float = 30.0,
+    ) -> str | None:
+        """Attempt to move QUEUED -> PROCESSING atomically with a lease token.
 
-        Uses a simple UPDATE ... WHERE for basic safety.
+        Jobs with a future ``run_at`` stay unclaimed until due (G1).
         """
         now = _now_iso()
+        token = _new_lease_token()
+        expires = _lease_expiry_iso(lease_seconds)
         with self._lock:
             cur = self._conn.execute(
                 """
                 UPDATE jobs
-                SET status = ?, updated_at = ?
+                SET status = ?, updated_at = ?,
+                    lease_expires_at = ?, lease_token = ?
                 WHERE id = ? AND status = ?
+                  AND (run_at IS NULL OR run_at <= ?)
                 """,
-                (JobStatus.PROCESSING.value, now, job_id, JobStatus.QUEUED.value),
+                (
+                    JobStatus.PROCESSING.value,
+                    now,
+                    expires,
+                    token,
+                    job_id,
+                    JobStatus.QUEUED.value,
+                    now,
+                ),
+            )
+            self._conn.commit()
+        return token if cur.rowcount > 0 else None
+
+    def heartbeat(
+        self,
+        job_id: str,
+        lease_token: str,
+        *,
+        lease_seconds: float = 30.0,
+    ) -> bool:
+        now = _now_iso()
+        expires = _lease_expiry_iso(lease_seconds)
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE jobs
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND lease_token = ?
+                """,
+                (expires, now, job_id, JobStatus.PROCESSING.value, lease_token),
             )
             self._conn.commit()
         return cur.rowcount > 0
+
+    def reclaim_stale_leases(self, *, limit: int = 50) -> list[str]:
+        """Requeue PROCESSING jobs with an expired or missing lease."""
+        now = _now_iso()
+        requeued: list[str] = []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id FROM jobs
+                WHERE status = ?
+                  AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                (JobStatus.PROCESSING.value, now, limit),
+            ).fetchall()
+            for row in rows:
+                job_id = row["id"]
+                cur = self._conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, updated_at = ?, error = ?,
+                        lease_expires_at = NULL, lease_token = NULL
+                    WHERE id = ? AND status = ?
+                      AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+                    """,
+                    (
+                        JobStatus.QUEUED.value,
+                        now,
+                        "Recovered from expired processing lease",
+                        job_id,
+                        JobStatus.PROCESSING.value,
+                        now,
+                    ),
+                )
+                if cur.rowcount > 0:
+                    requeued.append(job_id)
+            self._conn.commit()
+        return requeued
 
     def close(self) -> None:
         """Close the connection, under the same lock every query holds.

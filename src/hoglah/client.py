@@ -39,7 +39,10 @@ from .models import (
     JobRequest,
     JobResult,
     JobStatus,
+    RetryPolicy,
+    effective_retry_policy,
     normalize_request,
+    resolve_run_at,
 )
 from .store import JobStore, create_sqlite_store
 from .tracing import (
@@ -312,9 +315,15 @@ class Hoglah:
         priority: int = 0,
         timeout_seconds: int | None = None,
         max_retries: int = 2,
+        retry_policy: RetryPolicy | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         parent_job_id: str | None = None,
         step_name: str | None = None,  # human label for the LLM debugging view
+        # Scheduling (G1) — at most one of run_at / delay_seconds
+        run_at: datetime | str | None = None,
+        delay_seconds: float | int | None = None,
+        # Idempotent submit (G6) — same key returns the existing job id
+        idempotency_key: str | None = None,
         # Generation params
         temperature: float | None = None,
         top_p: float | None = None,
@@ -332,6 +341,24 @@ class Hoglah:
         The full request is persisted; execution happens asynchronously when a
         worker picks it up — either this instance's background worker
         (start_worker=True) or a separate worker daemon sharing the same store.
+
+        Scheduling (optional, gap G1):
+            delay_seconds=N  — run at least N seconds from now
+            run_at=datetime | ISO str  — run at that UTC instant
+        Pass at most one. The job stays ``queued`` until due; the worker will
+        not claim it early.
+
+        Retries (gap G2):
+            max_retries=N  — legacy; additional attempts after the first
+            retry_policy=RetryPolicy(...) | dict  — full policy (max, backoff,
+            jitter, retry_on). When provided, it is the source of truth;
+            ``max_retries`` is only used to fill a missing dict key or as the
+            whole policy when ``retry_policy`` is omitted.
+
+        Idempotency (gap G6):
+            idempotency_key=str  — re-submit with the same key returns the
+            existing job id (no second row). Useful for agent loops that may
+            retry after a crash. Independent of messaging ``correlation_id``.
         """
         if not model:
             raise ValueError("model is required")
@@ -353,6 +380,24 @@ class Hoglah:
             else:
                 raise TypeError("callback must be a callable or a string key")
 
+        scheduled_run_at = resolve_run_at(run_at=run_at, delay_seconds=delay_seconds)
+        policy = RetryPolicy.from_any(retry_policy, max_retries=max_retries)
+
+        idemp: str | None = None
+        if idempotency_key is not None:
+            idemp = str(idempotency_key).strip() or None
+
+        # Fast path for the common agent-retry case: same key → same job, no
+        # second queued event. Concurrent races still resolve in the store via
+        # the unique index.
+        if idemp is not None and hasattr(self._store, "find_by_idempotency_key"):
+            existing = self._store.find_by_idempotency_key(idemp)
+            if existing is not None:
+                job_id = existing["id"]
+                if direct_cb is not None:
+                    self._direct_callbacks[job_id] = direct_cb
+                return job_id
+
         # Build the persistable request
         req = normalize_request(
             kind=kind,
@@ -365,9 +410,12 @@ class Hoglah:
             tags=tags,
             priority=priority,
             timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
+            max_retries=policy.max_retries,
+            retry_policy=policy.to_dict(),
             metadata=metadata,
             parent_job_id=parent_job_id,
+            run_at=scheduled_run_at,
+            idempotency_key=idemp,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
@@ -389,7 +437,9 @@ class Hoglah:
                 raise ValueError(f"callback_url not allowed: {reason}")
 
         # Enqueue (store the request)
-        job_id = self._store.enqueue(req, callback_key=callback_key)
+        job_id = self._store.enqueue(
+            req, callback_key=callback_key, idempotency_key=idemp
+        )
         self._witness.emit(
             JOB_QUEUED,
             job_id=job_id,
@@ -418,8 +468,12 @@ class Hoglah:
         priority: int = 0,
         timeout_seconds: int | None = None,
         max_retries: int = 2,
+        retry_policy: RetryPolicy | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         parent_job_id: str | None = None,
+        run_at: datetime | str | None = None,
+        delay_seconds: float | int | None = None,
+        idempotency_key: str | None = None,
         **extra: Any,
     ) -> str:
         """Submit an embedding job. Returns the job ID immediately.
@@ -427,7 +481,8 @@ class Hoglah:
         Convenience wrapper over submit(kind="embed"): the input text is
         carried in `prompt` and the worker routes it to adapter.embed(); the
         resulting JobResult has `embedding` / `embedding_dim` set and `output`
-        is None.
+        is None. Accepts the same schedule, retry_policy, and idempotency_key
+        args as :meth:`submit`.
         """
         return self.submit(
             kind="embed",
@@ -439,8 +494,12 @@ class Hoglah:
             priority=priority,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
+            retry_policy=retry_policy,
             metadata=metadata,
             parent_job_id=parent_job_id,
+            run_at=run_at,
+            delay_seconds=delay_seconds,
+            idempotency_key=idempotency_key,
             **extra,
         )
 
@@ -661,8 +720,19 @@ class Hoglah:
 
         while self._worker_running:
             try:
-                # Get a small batch of queued jobs (priority + age order is handled by store)
-                queued = self._store.list(status=JobStatus.QUEUED, limit=10)
+                # Reclaim PROCESSING jobs whose lease expired (dead workers).
+                # Safe under multi-worker: only stale leases are requeued (G3).
+                try:
+                    reclaimed = self._store.reclaim_stale_leases(limit=20)
+                    for rid in reclaimed:
+                        logger.info("Reclaimed stale lease for job %s", rid)
+                except Exception:
+                    logger.exception("Error reclaiming stale leases")
+
+                # Get a small batch of *due* queued jobs (priority + age order
+                # is handled by store). due_only skips delayed/scheduled jobs
+                # whose run_at is still in the future (G1).
+                queued = self._store.list(status=JobStatus.QUEUED, limit=10, due_only=True)
                 for row in queued:
                     if not self._worker_running:
                         break
@@ -690,9 +760,9 @@ class Hoglah:
         # Graceful drain on shutdown: let in-flight jobs finish within a
         # bounded window (under close()'s 3s thread-join), then cancel any
         # stragglers. A cancelled straggler is left in PROCESSING (no terminal
-        # result written here) on purpose: the next worker startup's
-        # _recover_interrupted_jobs re-queues PROCESSING jobs for retry
-        # (DQ-004). Writing a terminal result here would defeat that recovery.
+        # result written here) on purpose: once its lease expires, reclaim
+        # (startup or another worker's poll) re-queues it (G3 / DQ-004).
+        # Writing a terminal result here would defeat that recovery.
         pending = {t for t in self._inflight.values() if not t.done()}
         if pending:
             done, still = await asyncio.wait(pending, timeout=_SHUTDOWN_DRAIN_SECONDS)
@@ -703,9 +773,13 @@ class Hoglah:
 
     async def _process_job(self, job_id: str, sem: asyncio.Semaphore) -> None:
         """Claim and execute one job. Release semaphore on exit."""
+        lease_token: str | None = None
+        hb_task: asyncio.Task | None = None
         try:
-            claimed = self._store.claim_for_processing(job_id)
-            if not claimed:
+            lease_token = self._store.claim_for_processing(
+                job_id, lease_seconds=self.config.lease_seconds
+            )
+            if not lease_token:
                 return
 
             row = self._store.get(job_id)
@@ -714,6 +788,12 @@ class Hoglah:
 
             request = JobRequest(**row.get("request", {}))
             callback_key = row.get("callback_key")
+
+            # Heartbeat loop keeps the lease alive while we run (G3).
+            hb_task = asyncio.create_task(
+                self._heartbeat_loop(job_id, lease_token),
+                name=f"hoglah-hb-{job_id[:8]}",
+            )
 
             self._witness.emit(
                 JOB_STARTED,
@@ -736,8 +816,15 @@ class Hoglah:
             if latest and JobStatus(latest["status"]) == JobStatus.CANCELLED:
                 return
 
-            # Persist final result
-            self._store.set_result(job_id, result)
+            # Persist final result only if we still own the lease (G3).
+            wrote = self._store.set_result(job_id, result, lease_token=lease_token)
+            if not wrote:
+                logger.info(
+                    "Job %s completed but lease was lost (reclaimed or cancelled); "
+                    "not writing result",
+                    job_id,
+                )
+                return
             terminal_row = self._store.get(job_id) or {}
 
             failed = result.status == JobStatus.FAILED
@@ -798,7 +885,11 @@ class Hoglah:
                     error="Unexpected worker error",
                     model=getattr(request, "model", None) if "request" in locals() else None,
                 )
-                self._store.set_result(job_id, err_result)
+                # Token-gated so a reclaimed job is not marked failed by the loser.
+                if lease_token:
+                    self._store.set_result(job_id, err_result, lease_token=lease_token)
+                else:
+                    self._store.set_result(job_id, err_result)
                 self._witness.emit(
                     JOB_FAILED,
                     job_id=job_id,
@@ -809,18 +900,47 @@ class Hoglah:
             except Exception:
                 pass
         finally:
+            if hb_task is not None:
+                hb_task.cancel()
+                try:
+                    await hb_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             sem.release()
 
-    async def _execute_with_retries(self, job_id: str, request: JobRequest) -> JobResult:
-        """Run the Ollama call, with simple retry for transient errors.
+    async def _heartbeat_loop(self, job_id: str, lease_token: str) -> None:
+        """Periodically extend the PROCESSING lease until cancelled or lost."""
+        interval = float(self.config.heartbeat_interval_seconds)
+        # Keep heartbeat comfortably inside the lease window.
+        lease = float(self.config.lease_seconds)
+        if interval >= lease:
+            interval = max(1.0, lease / 3.0)
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                ok = self._store.heartbeat(
+                    job_id, lease_token, lease_seconds=self.config.lease_seconds
+                )
+                if not ok:
+                    logger.warning(
+                        "Lost lease on job %s during heartbeat; stopping heartbeat",
+                        job_id,
+                    )
+                    return
+        except asyncio.CancelledError:
+            return
 
-        `timeout_seconds` (ADR-011) caps each attempt's wall-clock time and,
-        on expiry, marks the job FAILED without retry — the budget is the
-        whole point, so retrying would defeat it. `asyncio.wait_for` also
-        cancels the in-flight generation, freeing the worker slot rather
-        than leaking it to a stuck model.
+    async def _execute_with_retries(self, job_id: str, request: JobRequest) -> JobResult:
+        """Run the Ollama call under the job's RetryPolicy (gap G2).
+
+        ``timeout_seconds`` still caps each attempt's wall-clock time via
+        ``asyncio.wait_for``. By default a job-level timeout is terminal
+        (ADR-011); include ``timeout`` or ``all`` in ``retry_on`` to retry it.
         """
-        max_retries = getattr(request, "max_retries", 2) or 2
+        policy = effective_retry_policy(request)
+        max_retries = policy.max_retries
         _timeout = getattr(request, "timeout_seconds", None)
         is_embed = getattr(request, "kind", "generate") == "embed"
 
@@ -869,23 +989,31 @@ class Hoglah:
                     effective_num_ctx=meta.get("effective_num_ctx") or request.num_ctx,
                 )
             except asyncio.TimeoutError:
-                # ADR-011: timeout_seconds marks the job failed (terminal,
-                # not retried). Caught before the generic handler so it is
-                # never misread as a transient error and retried.
                 timed_out = True
                 last_error = f"Timed out after {_timeout}s (timeout_seconds)"
                 logger.warning("Job %s timed out after %ss", job_id, _timeout)
+                if attempt < max_retries and policy.should_retry(
+                    TimeoutError(last_error), job_timeout=True
+                ):
+                    delay = policy.delay_for_attempt(attempt)
+                    logger.info(
+                        "Job %s retrying after job timeout (attempt %s/%s, sleep %.2fs)",
+                        job_id, attempt + 1, max_retries + 1, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 break
             except Exception as exc:
                 last_error = str(exc)
-                is_transient = self._is_transient_error(exc)
+                retryable = policy.should_retry(exc)
                 logger.warning(
-                    "Job %s attempt %s/%s failed: %s (transient=%s)",
-                    job_id, attempt + 1, max_retries + 1, last_error, is_transient
+                    "Job %s attempt %s/%s failed: %s (retryable=%s, policy=%s)",
+                    job_id, attempt + 1, max_retries + 1, last_error, retryable,
+                    list(policy.retry_on),
                 )
-                if is_transient and attempt < max_retries:
-                    backoff = min(2 ** attempt, 10)  # simple exponential
-                    await asyncio.sleep(backoff)
+                if retryable and attempt < max_retries:
+                    delay = policy.delay_for_attempt(attempt)
+                    await asyncio.sleep(delay)
                     continue
                 break
 
@@ -921,14 +1049,8 @@ class Hoglah:
         return await self.adapter.run(req)
 
     def _is_transient_error(self, exc: Exception) -> bool:
-        """Simple classification for retry (per ADR-011)."""
-        msg = str(exc).lower()
-        if any(x in msg for x in ("connection", "timeout", "rate", "5", "server", "unavailable")):
-            return True
-        # Context errors are not transient (we still report them)
-        if "context" in msg or "exceed" in msg:
-            return False
-        return False
+        """Backward-compatible wrapper around RetryPolicy classification."""
+        return RetryPolicy().should_retry(exc)
 
     def _fire_callback(self, job_id: str, result: JobResult, callback_key: str | None) -> None:
         """Fire callback if registered (direct for this process or via named registry)."""
@@ -1038,17 +1160,15 @@ class Hoglah:
         )
 
     def _recover_interrupted_jobs(self) -> None:
-        """On startup, deal with jobs that were left in PROCESSING state."""
-        for row in self._store.list(status=JobStatus.PROCESSING, limit=50):
-            job_id = row["id"]
-            req = row.get("request", {})
-            _max_r = req.get("max_retries", 2)  # available for future more sophisticated recovery policy
+        """On startup, requeue PROCESSING jobs whose lease has expired (G3).
 
-            # Simple policy: move back to QUEUED so the worker can retry.
-            # (We could also mark FAILED with "interrupted" if we tracked attempts.)
-            self._store.update_status(
-                job_id, JobStatus.QUEUED, error="Recovered from interrupted processing"
-            )
+        Live multi-worker peers keep heartbeating; their leases are not expired
+        and are left alone (ADR-016 upgrade). Missing ``lease_expires_at``
+        (pre-G3 rows, or a crash before claim finished writing) is treated as
+        stale so single-worker crash recovery still works.
+        """
+        requeued = self._store.reclaim_stale_leases(limit=100)
+        for job_id in requeued:
             logger.info("Recovered interrupted job %s (re-queued for retry)", job_id)
 
     def close(self) -> None:

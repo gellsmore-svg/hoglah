@@ -14,7 +14,7 @@ revising scope.
 3. Move closed gaps to §7 “Closed”
 4. Bump “Last reviewed” and package baseline when done
 
-**Last reviewed:** 2026-08-07  
+**Last reviewed:** 2026-08-07 (G1 + G2 + G3 + G6 closed)  
 **Next review trigger:** any release that changes queue semantics, scheduling,
 leases, rate limits, or multi-worker crash recovery
 
@@ -78,7 +78,7 @@ Update checkboxes when verifying against code.
 | Durable store Mongo (multi-worker) | ✅ | `mongo_store.py`, extra `[mongo]` |
 | Priority scheduling | ✅ | `JobRequest.priority`, store sort |
 | Concurrency limit | ✅ | `config.concurrency` (default 1) |
-| Retries | ✅ | `max_retries`, transient retry in worker |
+| Retries | ✅ | `RetryPolicy` (max/backoff/jitter/retry_on) + legacy `max_retries` |
 | Per-job timeout | ✅ | `timeout_seconds` |
 | Cancel (best-effort) | ✅ | `Hoglah.cancel`, status `cancelled` |
 | Poll / wait | ✅ | `status`, `wait` |
@@ -101,6 +101,10 @@ Update checkboxes when verifying against code.
 | Keturah capability manifest | ✅ | `manifest.py` |
 | Safe stub adapter default | ✅ | real Ollama opt-in |
 | Correlation idempotency on bridges | ✅ | Mongo unique correlation_id |
+| Delayed / scheduled enqueue | ✅ | `delay_seconds` / `run_at`; store due-index; no cron |
+| PROCESSING lease + heartbeat | ✅ | token + `lease_expires_at`; stale reclaim only |
+| Richer retry policy | ✅ | `RetryPolicy`; named classes; jittered exponential |
+| Idempotent submit | ✅ | `idempotency_key` unique index (≠ bridge correlation_id) |
 
 ---
 
@@ -116,12 +120,13 @@ Legend: **Y** yes · **P** partial · **N** no · **N/A** wrong layer
 | Context truncation metadata | **Y** | N | N | N | N | P |
 | Multi-host Ollama affinity | **Y** | N | N | N | N | P |
 | Priority | Y | P | Y | Y | Y | P |
-| Retries + backoff | P | P | Y | **Y** | Y | Y |
+| Retries + backoff | **Y** (policy object) | P | Y | **Y** | Y | Y |
 | Per-job timeout | Y | Y | Y | Y | Y | Y |
 | Cancel in-flight | P | P | P | P | P | P |
-| Delayed / scheduled / cron | **N** | P | Y | P | **Y** | P |
+| Worker lease / reclaim | **Y** | N | P | Y | P | N |
+| Delayed / scheduled / cron | **P** (delay/run_at; no cron) | P | Y | P | **Y** | P |
 | Rate limiting / quotas | **N** | N | P | **Y** | Y | **Y** |
-| Unique / dedupe jobs | P | N | P | P | P | P |
+| Unique / dedupe jobs | **Y** (`idempotency_key`) | N | P | P | P | P |
 | Chains / chords / DAG | **N** | N | P | P | **Y** | N |
 | Dead-letter (broker poison) | Y | P | P | Y | Y | P |
 | Dead-letter (failed jobs UX) | P | P | P | P | P | P |
@@ -159,12 +164,8 @@ When closing, move the row to §7 with date + version.
 
 | ID | Gap | Status | Why it matters | Suggested cut |
 |---|---|---|---|---|
-| G1 | Delayed / scheduled jobs | open | Agent backoff, off-peak embedding, deferred re-ingest | `submit(..., run_at=… \| delay_seconds=N)` + due-index |
-| G2 | Richer retry policy | open | OOM vs timeout vs 5xx need different behaviour | `{max, backoff, jitter, retry_on}` |
-| G3 | Lease / heartbeat for PROCESSING | open | Multi-worker Mongo: dead worker must requeue | Heartbeat interval; stale → requeue |
 | G4 | Harder in-flight cancel | open | Cancel often only affects queued | Coordinate with lease + adapter cancel |
 | G5 | Rate limits / fairness | open | Many agents share one GPU | Token bucket per tag/session; per-model slots |
-| G6 | Idempotent submit API | open | Agent loops double-enqueue | `idempotency_key=` / unique constraint |
 
 ### P1 — Production local estate
 
@@ -203,11 +204,10 @@ When closing, move the row to §7 with date + version.
 
 | ID | Gap | Closed in version | Date | Notes |
 |---|---|---|---|---|
-| — | — | — | — | — |
-
-Example row when shipping:
-
-| G1 | Delayed jobs | 0.10.0 | 2026-… | `run_at` + store index |
+| G1 | Delayed / scheduled jobs | unreleased (→0.10) | 2026-08-07 | `delay_seconds` / `run_at` on submit + embed; store `run_at` column + due-index; worker `due_only` + claim guard; CLI `--delay` / `--run-at`. No cron/recurrence. |
+| G2 | Richer retry policy | unreleased (→0.10) | 2026-08-07 | `RetryPolicy` + `submit(retry_policy=)`; classes include oom/timeout opt-in; jittered backoff; `max_retries=0` fix. |
+| G3 | PROCESSING lease + heartbeat | unreleased (→0.10) | 2026-08-07 | `lease_token` + `lease_expires_at`; heartbeat while running; `reclaim_stale_leases` on startup + poll; token-gated `set_result`. |
+| G6 | Idempotent submit | unreleased (→0.10) | 2026-08-07 | `idempotency_key` on submit/embed + CLI; unique index; find-before-insert + race-safe IntegrityError path. |
 
 ---
 
@@ -215,16 +215,13 @@ Example row when shipping:
 
 If resuming without further instruction, default order:
 
-1. **G1** Delayed / scheduled enqueue  
-2. **G3** PROCESSING lease + reclaim  
-3. **G2** Retry policy object  
-4. **G6** Idempotency key on submit  
-5. **G10** Per-model concurrency slots  
-6. **G5** Fairness / rate limit  
-7. **G7** Minimal depends_on  
-8. **G9** Failed-job DLQ + requeue  
-9. **G11** Prometheus metrics  
-10. **G8** Optional token streaming  
+1. **G10** Per-model concurrency slots  
+2. **G5** Fairness / rate limit  
+3. **G7** Minimal depends_on  
+4. **G9** Failed-job DLQ + requeue  
+5. **G11** Prometheus metrics  
+6. **G8** Optional token streaming  
+7. **G4** Harder in-flight cancel (builds on G3 leases)  
 
 Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 
@@ -256,6 +253,10 @@ Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 | Date | Reviewer / session | Changes |
 |---|---|---|
 | 2026-08-07 | Grok CLI session | Initial capture from Hoglah vs RQ/Huey/Dramatiq/Celery/LiteLLM/etc. |
+| 2026-08-07 | Grok CLI session | Closed G1 delayed/scheduled jobs (`run_at` / `delay_seconds`). |
+| 2026-08-07 | Grok CLI session | Closed G3 PROCESSING leases + heartbeat + stale reclaim. |
+| 2026-08-07 | Grok CLI session | Closed G2 RetryPolicy (max/backoff/jitter/retry_on). |
+| 2026-08-07 | Grok CLI session | Closed G6 idempotency_key on submit. |
 
 ---
 

@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+- **Idempotent submit (gap G6)** — `submit(..., idempotency_key=…)` /
+  `submit_embedding` and CLI `--idempotency-key`. Re-submit with the same key
+  returns the existing job id (unique index on SQLite + Mongo); independent of
+  messaging `correlation_id`. Direct callbacks re-register on a hit.
+- **Richer retry policy (gap G2)** — `RetryPolicy(max_retries, base_delay,
+  backoff_factor, max_delay, jitter, retry_on)` on `submit` /
+  `submit_embedding` (or a plain dict). Named `retry_on` classes:
+  `transient` (default), `connection`, `timeout`, `rate_limit`, `server`,
+  `oom`, `all`, `none`. OOM is **not** retried by default; job-level
+  `timeout_seconds` stays terminal unless `timeout`/`all` is opted in
+  (ADR-011). Equal-jitter backoff; `max_retries=0` is truly one attempt
+  (fixes a prior falsy `or 2` bug). CLI: `--max-retries`, `--retry-on`,
+  `--retry-base-delay`, `--retry-max-delay`, `--retry-jitter`,
+  `--retry-policy JSON`.
+- **PROCESSING leases + heartbeat (gap G3)** — multi-worker safe reclaim of dead
+  workers. `claim_for_processing` returns a lease token and sets
+  `lease_expires_at`; the worker heartbeats while a job runs
+  (`lease_seconds` default 30, `heartbeat_interval_seconds` default 10).
+  `reclaim_stale_leases()` requeues only expired/missing leases (startup + each
+  poll). Token-gated `set_result(..., lease_token=)` prevents a late completer
+  from clobbering a reclaimed job. Cancel / legacy writes still unconditional.
+  Env: `HOGLAH_LEASE_SECONDS`, `HOGLAH_HEARTBEAT_INTERVAL_SECONDS`.
+- **Delayed / scheduled jobs (gap G1)** — `submit(..., delay_seconds=N)` or
+  `submit(..., run_at=datetime|ISO)` enqueues a job that stays `queued` until
+  due. The worker poll uses a due-index (`list(..., due_only=True)`); claim
+  refuses future `run_at` as a second guard. Same args on `submit_embedding`.
+  CLI: `hoglah submit … --delay 60` or `--run-at 2026-08-08T02:00:00Z`.
+  SQLite migrates a `run_at` column + `idx_jobs_due`; Mongo stores `run_at`
+  with a matching index. Pass at most one of the two schedule args.
+
 - Version-skew guard on the galeed llm_calls record: an older galeed that does
   not accept `usage`/timing kwargs now falls back to the previous call shape and
   **warns**, instead of raising a TypeError that the catch-all swallowed. That

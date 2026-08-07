@@ -695,6 +695,35 @@ def submit(
     metadata: str | None = typer.Option(None, "--metadata", help="User metadata as JSON object, e.g. '{\"key\":\"value\"}'"),
     parent_job_id: str | None = typer.Option(None, "--parent-job-id", help="Parent job ID for chaining/traceability"),
     step: str | None = typer.Option(None, "--step", help="Human step name for the LLM debugging view, e.g. initial_research"),
+    delay: float | None = typer.Option(
+        None, "--delay", help="Seconds to wait before the job becomes runnable (G1 delayed enqueue)"
+    ),
+    run_at: str | None = typer.Option(
+        None, "--run-at", help="ISO-8601 UTC datetime when the job becomes runnable (mutually exclusive with --delay)"
+    ),
+    max_retries: int = typer.Option(2, "--max-retries", help="Additional attempts after the first (0 = try once)"),
+    retry_on: str | None = typer.Option(
+        None,
+        "--retry-on",
+        help="Comma-separated retry classes: transient,connection,timeout,rate_limit,server,oom,all,none",
+    ),
+    retry_base_delay: float | None = typer.Option(
+        None, "--retry-base-delay", help="Initial backoff seconds (default 1.0)"
+    ),
+    retry_max_delay: float | None = typer.Option(
+        None, "--retry-max-delay", help="Backoff cap in seconds (default 10.0)"
+    ),
+    retry_jitter: float | None = typer.Option(
+        None, "--retry-jitter", help="Equal-jitter fraction 0..1 (default 0)"
+    ),
+    retry_policy_json: str | None = typer.Option(
+        None, "--retry-policy", help="Full RetryPolicy as JSON object (overrides other --retry-* flags)"
+    ),
+    idempotency_key: str | None = typer.Option(
+        None,
+        "--idempotency-key",
+        help="If the same key was already submitted, return that job id (no duplicate)",
+    ),
     # CLI control
     db: Path | None = typer.Option(None, "--db"),
     real: bool = typer.Option(False, "--real", help="Use real Ollama (requires server); default is safe stub"),
@@ -708,6 +737,8 @@ def submit(
         hoglah submit "Tell me about Hoglah" --model gemma3:1b --wait
         hoglah submit --model llama3.2 --messages '[{"role":"user","content":"hi"}]' --temperature 0.7
         hoglah submit "..." --model x --metadata '{"source":"agent1"}' --parent-job-id abc-123
+        hoglah submit "later" --model x --delay 60
+        hoglah submit "nightly" --model x --run-at 2026-08-08T02:00:00Z
     """
     tag_list = [t.strip() for t in tags.split(",")] if tags else None
 
@@ -740,29 +771,64 @@ def submit(
         typer.secho("Error: provide a PROMPT argument or --messages (JSON).", fg=typer.colors.RED)
         raise typer.Exit(1)
 
+    if delay is not None and run_at is not None:
+        typer.secho("Error: pass only one of --delay or --run-at.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    # Build retry_policy from CLI flags (G2).
+    policy_arg: dict[str, Any] | None = None
+    if retry_policy_json:
+        try:
+            parsed_policy = json.loads(retry_policy_json)
+            if not isinstance(parsed_policy, dict):
+                raise ValueError("must be a JSON object")
+            policy_arg = parsed_policy
+        except Exception as e:
+            typer.secho(f"Invalid --retry-policy JSON: {e}", fg=typer.colors.RED)
+            raise typer.Exit(1)
+    elif any(v is not None for v in (retry_on, retry_base_delay, retry_max_delay, retry_jitter)):
+        policy_arg = {"max_retries": max_retries}
+        if retry_on is not None:
+            policy_arg["retry_on"] = [p.strip() for p in retry_on.split(",") if p.strip()]
+        if retry_base_delay is not None:
+            policy_arg["base_delay"] = retry_base_delay
+        if retry_max_delay is not None:
+            policy_arg["max_delay"] = retry_max_delay
+        if retry_jitter is not None:
+            policy_arg["jitter"] = retry_jitter
+
     # A worker is only needed if we are going to block for the result here;
     # a bare submit just enqueues and leaves execution to `hoglah worker`.
     h = _get_hoglah(db, real=real, ollama_host=ollama_host, start_worker=wait)
 
-    job_id = h.submit(
-        prompt=prompt,
-        messages=messages,
-        model=model,
-        system_prompt=system_prompt,
-        tags=tag_list,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        num_ctx=num_ctx,
-        num_predict=num_predict,
-        seed=seed,
-        repeat_penalty=repeat_penalty,
-        format=format,
-        keep_alive=keep_alive,
-        metadata=meta_dict,
-        parent_job_id=parent_job_id,
-        step_name=step,
-    )
+    try:
+        job_id = h.submit(
+            prompt=prompt,
+            messages=messages,
+            model=model,
+            system_prompt=system_prompt,
+            tags=tag_list,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            num_ctx=num_ctx,
+            num_predict=num_predict,
+            seed=seed,
+            repeat_penalty=repeat_penalty,
+            format=format,
+            keep_alive=keep_alive,
+            metadata=meta_dict,
+            parent_job_id=parent_job_id,
+            step_name=step,
+            delay_seconds=delay,
+            run_at=run_at,
+            max_retries=max_retries,
+            retry_policy=policy_arg,
+            idempotency_key=idempotency_key,
+        )
+    except ValueError as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(1)
     typer.secho(f"Submitted: {job_id}", fg=typer.colors.GREEN)
 
     if wait:

@@ -18,6 +18,8 @@ multiple workers and machines when you point it at a shared backend.
 - **Durable and restart-safe** — jobs and results persist; interrupted jobs and
   undelivered callbacks are recovered on restart.
 - **Configurable concurrency** — default 1, tune for your hardware.
+- **Lease-based multi-worker reclaim** — PROCESSING jobs hold a heartbeat lease;
+  dead workers' jobs are requeued without clobbering live peers.
 - **Context-aware** — auto-detects a model's context window and reports truncation
   rather than failing.
 - **Four result-delivery paths** — poll/`wait()`, in-process callbacks (including a
@@ -78,10 +80,43 @@ h.submit(
 )
 ```
 
+Schedule work for later (stays `queued` until due; worker will not claim early):
+
+```python
+h.submit(prompt="…", model="gemma3:1b", delay_seconds=60)
+h.submit(prompt="…", model="gemma3:1b", run_at="2026-08-08T02:00:00Z")
+```
+
+Tune retries per job (OOM is not retried unless opted in):
+
+```python
+from hoglah import RetryPolicy
+
+h.submit(
+    prompt="…", model="gemma3:1b",
+    retry_policy=RetryPolicy(
+        max_retries=4,
+        base_delay=1.0,
+        max_delay=30.0,
+        jitter=0.1,
+        retry_on=("transient", "oom"),
+    ),
+)
+```
+
+Deduplicate agent retries with an idempotency key (same key → same job id):
+
+```python
+h.submit(prompt="…", model="gemma3:1b", idempotency_key="session-42/step-3")
+```
+
 ### CLI
 
 ```bash
 hoglah submit "Explain Hoglah" --model gemma3:1b --wait --real
+hoglah submit "later" --model gemma3:1b --delay 60
+hoglah submit "nightly" --model gemma3:1b --run-at 2026-08-08T02:00:00Z
+hoglah submit "once" --model gemma3:1b --idempotency-key agent-step-3
 hoglah ps --json                  # list jobs (machine-readable)
 hoglah status <job-id> --json
 hoglah wait <job-id> --timeout 60

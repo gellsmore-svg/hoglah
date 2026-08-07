@@ -124,20 +124,21 @@ def test_startup_recovery_is_a_worker_responsibility():
 
     A pure submitter (start_worker=False) sharing the queue with a separate
     worker daemon must NOT re-queue PROCESSING jobs, or it would clobber the
-    daemon's in-flight work. The worker path still recovers them.
+    daemon's in-flight work. The worker path reclaims only *stale* leases (G3).
     """
     db = _temp_db()
 
     h1 = Hoglah(config={"db_path": db}, start_worker=False)
     job_id = h1.submit(prompt="will be interrupted", model="gemma:2b")
-    # Simulate the job having been claimed but the process died
+    # Simulate a claimed job whose worker died (lease expired / missing).
     h1._store.update_status(job_id, JobStatus.PROCESSING)
+    # No lease_expires_at → treated as stale (pre-G3 / crash mid-claim).
 
     # Submitter mode: constructing another client must leave it PROCESSING.
     h2 = Hoglah(config={"db_path": db}, start_worker=False)
     assert h2.status(job_id) == JobStatus.PROCESSING
 
-    # The worker's recovery routine moves it back to QUEUED.
+    # The worker's recovery routine reclaims the stale lease → QUEUED.
     h2._recover_interrupted_jobs()
     assert h2.status(job_id) == JobStatus.QUEUED
 

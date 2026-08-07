@@ -52,9 +52,11 @@ def test_mongo_store_contract():
         assert any(r["id"] == jid for r in store.list(status=JobStatus.QUEUED))
         assert all(r["id"] != jid for r in store.list(status=JobStatus.COMPLETED))
 
-        # atomic claim: first wins, second fails (single-execution guarantee)
-        assert store.claim_for_processing(jid) is True
-        assert store.claim_for_processing(jid) is False
+        # atomic claim: first wins with a lease token, second fails
+        token = store.claim_for_processing(jid)
+        assert token is not None
+        assert store.claim_for_processing(jid) is None
+
 
         # set_result mirrors SQLite shape (parsed + *_json)
         store.set_result(jid, JobResult(job_id=jid, status=JobStatus.COMPLETED, output="ok", model="m"))
@@ -194,7 +196,7 @@ def test_mongo_concurrent_claim_exactly_once():
         jid = store.enqueue(JobRequest(prompt="contended", model="m"))
 
         n = 16
-        results: list[bool] = []
+        results: list[str | None] = []
         lock = threading.Lock()
         barrier = threading.Barrier(n)
 
@@ -210,8 +212,10 @@ def test_mongo_concurrent_claim_exactly_once():
         for t in threads:
             t.join()
 
-        assert sum(results) == 1, f"expected exactly one winner, got {sum(results)}"
+        winners = [r for r in results if r is not None]
+        assert len(winners) == 1, f"expected exactly one winner, got {len(winners)}"
         assert store.get(jid)["status"] == "processing"
+        assert store.get(jid)["lease_token"] == winners[0]
     finally:
         store._col.drop()
         store.close()

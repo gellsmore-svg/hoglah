@@ -166,6 +166,22 @@ class HoglahSettings(BaseSettings):
         description="Maximum number of concurrent Ollama generations (default 1 for low-resource setups).",
     )
 
+    # PROCESSING leases (gap G3). A claimed job holds a lease; the worker
+    # heartbeats to extend it. Another worker (or this one after restart) only
+    # requeues PROCESSING jobs whose lease has expired — so multi-worker Mongo
+    # does not re-queue a healthy peer's in-flight work (ADR-016 upgrade).
+    lease_seconds: float = Field(
+        default=30.0,
+        ge=5.0,
+        description="How long a PROCESSING lease lasts without a heartbeat (seconds).",
+    )
+    heartbeat_interval_seconds: float = Field(
+        default=10.0,
+        ge=0.1,
+        description="How often the worker extends the lease while a job runs. "
+        "Should be well under lease_seconds (defaults: 10s heartbeat, 30s lease).",
+    )
+
     # Ollama connection
     ollama_host: str | None = Field(
         default=None,
@@ -280,6 +296,8 @@ class HoglahSettings(BaseSettings):
             "db_path": str(self.db_path),
             "backend": self.backend,
             "concurrency": self.concurrency,
+            "lease_seconds": self.lease_seconds,
+            "heartbeat_interval_seconds": self.heartbeat_interval_seconds,
             "ollama_host": self.ollama_host,
             "ollama_hosts": list(self.ollama_hosts),
             "output_dir": str(self.output_dir) if self.output_dir else None,
