@@ -4,7 +4,7 @@ title: Hoglah
 description: A lightweight, local-first job queue for Ollama — submit generate/chat/embedding work asynchronously, run it on a durable background queue, and collect results by poll, callback, HTTP push, output file, or a messaging broker.
 resource: https://github.com/gellsmore-svg/hoglah
 tags: [hoglah, job-queue, ollama, local-first, llm]
-timestamp: 2026-06-19T00:00:00Z
+timestamp: 2026-08-07T00:00:00Z
 ---
 
 # Hoglah
@@ -41,4 +41,6 @@ description of Hoglah's concepts, modules, and CLI.
 - Storage: **SQLite by default** (zero setup), MongoDB optional — see [storage](modules/storage.md).
 - Inference: a deterministic **stub by default**; real Ollama is opt-in — see [adapters](modules/adapters.md).
 - Brokers: **Kafka, RabbitMQ, Redis Streams** bridges, all crash-safe — see [messaging bridges](modules/messaging-bridges.md).
-- Current version: 0.8.0 (Apache-2.0).
+- Current version: **0.10.2** (Apache-2.0).
+- Human guide: [`docs/user-guide.md`](../docs/user-guide.md).
+- AI / agent guide: [`docs/ai-user-guide.md`](../docs/ai-user-guide.md).

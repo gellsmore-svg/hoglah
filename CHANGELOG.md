@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Human [user guide](docs/user-guide.md) and [AI / agent user guide](docs/ai-user-guide.md).
+- Docs index ([docs/README.md](docs/README.md)) and repo [AGENTS.md](AGENTS.md).
+- README documentation map; OKF index version aligned to 0.10.2.
+
 ## [0.10.2] - 2026-08-07
 
 ### Added

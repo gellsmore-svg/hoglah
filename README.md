@@ -349,13 +349,17 @@ environment variable. Common ones:
 | `db_path` | `HOGLAH_DB_PATH` | `~/.hoglah/hoglah.db` | SQLite database file |
 | `backend` | `HOGLAH_BACKEND` | `sqlite` | `sqlite` or `mongo` |
 | `concurrency` | `HOGLAH_CONCURRENCY` | `1` | Parallel jobs per worker |
+| `lease_seconds` | `HOGLAH_LEASE_SECONDS` | `30` | PROCESSING lease TTL |
+| `model_slots` | `HOGLAH_MODEL_SLOTS` | `{}` | Per-model concurrency (`name=n,…`) |
+| `session_slots` | `HOGLAH_SESSION_SLOTS` | `None` | Concurrent jobs per session_id |
 | `ollama_host` | `HOGLAH_OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `output_dir` | `HOGLAH_OUTPUT_DIR` | `None` | Write terminal results here |
 | `log_level` | `HOGLAH_LOG_LEVEL` | `INFO` | Logging level |
 
 Backend- and bridge-specific keys (`mongo_*`, `kafka_*`, `rabbitmq_*`, `redis_*`)
-follow the same pattern; see the examples above. `hoglah doctor` prints the active
-backend and transport (and never prints connection URLs).
+and fairness settings (`tag_slots`, rates) follow the same pattern — full tables
+in the [user guide](docs/user-guide.md#13-configuration-cheat-sheet).
+`hoglah doctor` prints the active backend and transport (never connection URLs).
 
 ## Real Ollama notes
 
@@ -407,6 +411,18 @@ actionable, include:
 **Security issues:** please report privately — see [SECURITY.md](SECURITY.md) —
 rather than opening a public issue.
 
+## Documentation
+
+| Audience | Doc |
+|---|---|
+| **Humans** (operators, app developers) | [docs/user-guide.md](docs/user-guide.md) |
+| **AI agents** / tool-using models | [docs/ai-user-guide.md](docs/ai-user-guide.md) |
+| **Docs index** | [docs/README.md](docs/README.md) |
+| **Coding agents working in this repo** | [AGENTS.md](AGENTS.md) |
+
+Also: [CHANGELOG](CHANGELOG.md), [CONTRIBUTING](CONTRIBUTING.md),
+[SECURITY](SECURITY.md).
+
 ## Feature comparison & gaps
 
 Living checklist of Hoglah vs similar queues (RQ, Celery, Dramatiq, LLM
@@ -421,7 +437,8 @@ Update that file when shipping queue features or re-prioritising work.
 A machine- and human-readable knowledge map of Hoglah's concepts, modules, and CLI
 is published as an [Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
 bundle under [`okf/`](okf/index.md) — markdown with YAML frontmatter, linked into a
-concept graph.
+concept graph. Guides for day-to-day use are the human/AI user guides above;
+OKF is the structured concept map.
 
 ## License
 

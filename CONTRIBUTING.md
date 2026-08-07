@@ -2,6 +2,13 @@
 
 Thanks for your interest in Hoglah. This guide covers local development.
 
+**User documentation** (not only for contributors):
+
+- [docs/user-guide.md](docs/user-guide.md) — human operators and app developers  
+- [docs/ai-user-guide.md](docs/ai-user-guide.md) — agent contracts and invariants  
+- [docs/README.md](docs/README.md) — full documentation index  
+- [AGENTS.md](AGENTS.md) — short orientation for coding agents working in this repo
+
 ## Development setup
 
 ```bash

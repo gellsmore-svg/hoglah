@@ -267,6 +267,7 @@ Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 | 2026-08-07 | Grok CLI session | Closed G11 Prometheus metrics. |
 | 2026-08-07 | Grok CLI session | Closed G7 minimal depends_on. |
 | 2026-08-07 | Grok CLI session | Closed G4 harder in-flight cancel. |
+| 2026-08-07 | Grok CLI session | Human + AI user guides; docs index; AGENTS.md. |
 
 ---
 
