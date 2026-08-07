@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Failed-job DLQ + requeue (gap G9)** — operator view of inference failures
+  (not messaging poison): `hoglah dlq`, `hoglah requeue <id>`,
+  `hoglah requeue --all-failed`. Library: `Hoglah.requeue` /
+  `requeue_failed`. Resets FAILED → QUEUED, clears result/lease so a worker
+  runs the original request again. Web failed filter already via status cards;
+  job detail shows a CLI requeue hint.
 - **Idempotent submit (gap G6)** — `submit(..., idempotency_key=…)` /
   `submit_embedding` and CLI `--idempotency-key`. Re-submit with the same key
   returns the existing job id (unique index on SQLite + Mongo); independent of

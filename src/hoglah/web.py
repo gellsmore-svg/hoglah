@@ -11,7 +11,8 @@ submitting application) is driving.
 
 Security posture: bind to 127.0.0.1 by default. There is no auth; the
 operator runs it locally, browser on the same host. The UI is strictly
-read-only — maintenance actions stay in the CLI (`hoglah clear/rm/cancel`).
+read-only — maintenance actions stay in the CLI
+(`hoglah clear/rm/cancel/requeue/dlq`).
 
 Requires the ``web`` extra: ``pip install hoglah[web]``.
 """
@@ -385,9 +386,20 @@ setInterval(refresh, 4000);
         else:
             output_html = '<h2>Output</h2><p class="muted">(no output yet)</p>'
 
+        # G9: failed jobs stay read-only here; requeue is a CLI maintenance action.
+        requeue_hint = ""
+        if d.get("status") == "failed":
+            jid = escape(d["job_id"])
+            requeue_hint = (
+                f'<p class="muted">Failed job — requeue via CLI: '
+                f'<code>hoglah requeue {jid}</code> · '
+                f'<a href="/?status=failed">all failed</a></p>'
+            )
+
         body = f"""
 <h1>Job <code>{escape(d["job_id"])}</code></h1>
 <p><a href="/">&larr; back to queue</a></p>
+{requeue_hint}
 <table class="kvbox">
 <tr><th>Status</th><td><span class="badge {escape(d["status"])}">{escape(d["status"])}</span>
   <span class="muted">({escape(d.get("age") or "-")} ago)</span></td></tr>

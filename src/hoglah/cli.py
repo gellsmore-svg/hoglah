@@ -519,6 +519,103 @@ def rm_job(
 
 
 @app.command()
+def dlq(
+    limit: int = typer.Option(20, "--limit", "-l"),
+    db: Path | None = typer.Option(None, "--db"),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of human text"),
+) -> None:
+    """List failed jobs (dead-letter / DLQ view for inference failures, gap G9).
+
+    Distinct from messaging poison DLQs (Kafka/Rabbit/Redis). This is the
+    operator view of jobs that ran and failed so they can be inspected or
+    requeued with ``hoglah requeue``.
+    """
+    h = _get_hoglah(db)
+    jobs = h.list(status=JobStatus.FAILED, limit=limit)
+    if json_out:
+        print(json.dumps([_result_to_dict(j) for j in jobs], indent=2, default=str))
+        return
+    if not jobs:
+        print("No failed jobs.")
+        return
+    print(f"{'JOB_ID':<38}  {'MODEL':<18}  ERROR")
+    print("-" * 80)
+    for j in jobs:
+        model = (j.model or "?")[:18]
+        err = (j.error or "").replace("\n", " ")
+        if len(err) > 48:
+            err = err[:45] + "..."
+        print(f"{j.job_id:<38}  {model:<18}  {err or '-'}")
+    print(f"\n{len(jobs)} failed job(s). Requeue with: hoglah requeue <job-id>")
+
+
+@app.command()
+def requeue(
+    job_id: str | None = typer.Argument(
+        None, help="Job ID to requeue (omit with --all-failed for bulk)"
+    ),
+    all_failed: bool = typer.Option(
+        False, "--all-failed", help="Requeue up to --limit failed jobs"
+    ),
+    limit: int = typer.Option(100, "--limit", "-l", help="Cap for --all-failed"),
+    allow_cancelled: bool = typer.Option(
+        False, "--allow-cancelled", help="Also accept cancelled jobs"
+    ),
+    db: Path | None = typer.Option(None, "--db"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation for bulk"),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Put a failed job back on the queue (gap G9).
+
+    Examples:
+        hoglah requeue <job-id>
+        hoglah requeue --all-failed --limit 20 --yes
+    """
+    h = _get_hoglah(db)
+    if all_failed:
+        if job_id:
+            typer.secho("Pass either a job id or --all-failed, not both.", fg=typer.colors.RED)
+            raise typer.Exit(1)
+        if not yes:
+            n = h.stats().get("failed", 0)
+            if allow_cancelled:
+                n += h.stats().get("cancelled", 0)
+            if not typer.confirm(f"Requeue up to {limit} terminal job(s) (~{n} candidates)?", default=False):
+                typer.secho("Cancelled.", fg=typer.colors.YELLOW)
+                raise typer.Exit(0)
+        ids = h.requeue_failed(limit=limit, allow_cancelled=allow_cancelled)
+        if json_out:
+            print(json.dumps({"requeued": ids, "count": len(ids)}, indent=2))
+            return
+        if not ids:
+            print("No jobs requeued.")
+            return
+        typer.secho(f"Requeued {len(ids)} job(s).", fg=typer.colors.GREEN)
+        for jid in ids:
+            print(f"  {jid}")
+        return
+
+    if not job_id:
+        typer.secho("Provide a job id or --all-failed.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    ok = h.requeue(job_id, allow_cancelled=allow_cancelled)
+    if json_out:
+        print(json.dumps({"job_id": job_id, "requeued": ok}, indent=2))
+        if not ok:
+            raise typer.Exit(1)
+        return
+    if ok:
+        typer.secho(f"Requeued {job_id} → queued", fg=typer.colors.GREEN)
+    else:
+        typer.secho(
+            f"Could not requeue {job_id} (not found, or not failed"
+            f"{'/cancelled' if allow_cancelled else ''}).",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+
+
+@app.command()
 def pull(
     model: str = typer.Argument(..., help="Model name to pull (e.g. gemma3:1b)"),
     real: bool = typer.Option(False, "--real", help="Use real Ollama (default is stub which does nothing)"),

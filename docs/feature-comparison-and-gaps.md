@@ -14,7 +14,7 @@ revising scope.
 3. Move closed gaps to §7 “Closed”
 4. Bump “Last reviewed” and package baseline when done
 
-**Last reviewed:** 2026-08-07 (G1 + G2 + G3 + G6 closed)  
+**Last reviewed:** 2026-08-07 (G1 + G2 + G3 + G6 + G9 closed)  
 **Next review trigger:** any release that changes queue semantics, scheduling,
 leases, rate limits, or multi-worker crash recovery
 
@@ -105,6 +105,7 @@ Update checkboxes when verifying against code.
 | PROCESSING lease + heartbeat | ✅ | token + `lease_expires_at`; stale reclaim only |
 | Richer retry policy | ✅ | `RetryPolicy`; named classes; jittered exponential |
 | Idempotent submit | ✅ | `idempotency_key` unique index (≠ bridge correlation_id) |
+| Failed-job DLQ + requeue | ✅ | `hoglah dlq` / `requeue`; store reset to QUEUED |
 
 ---
 
@@ -129,7 +130,7 @@ Legend: **Y** yes · **P** partial · **N** no · **N/A** wrong layer
 | Unique / dedupe jobs | **Y** (`idempotency_key`) | N | P | P | P | P |
 | Chains / chords / DAG | **N** | N | P | P | **Y** | N |
 | Dead-letter (broker poison) | Y | P | P | Y | Y | P |
-| Dead-letter (failed jobs UX) | P | P | P | P | P | P |
+| Dead-letter (failed jobs UX) | **Y** (dlq + requeue) | P | P | P | P | P |
 | Multi-broker consume | **Y** | N | N | P | Y | N |
 | Result webhooks | **Y** | N | N | N | P | Y |
 | File drop results | **Y** | N | N | N | N | N |
@@ -173,7 +174,6 @@ When closing, move the row to §7 with date + version.
 |---|---|---|---|---|
 | G7 | Dependencies beyond parent_id | open | parent_id is lineage only | Minimal `depends_on: [job_ids]` or enqueue-child-on-complete |
 | G8 | Streaming results | open | Interactive UIs want tokens | SSE on serve or chunk files; keep store final |
-| G9 | Failed-job DLQ view + requeue | open | Poison messages ≠ failed inference | CLI `requeue` + web filter on failed |
 | G10 | Per-model concurrency / slots | open | 70B vs 8B share one queue poorly | Slot table next to dispatch |
 | G11 | Metrics export | open | Ops parity with Flower/Horizon | Prometheus counters (queue depth, latency, fail) |
 
@@ -208,6 +208,7 @@ When closing, move the row to §7 with date + version.
 | G2 | Richer retry policy | unreleased (→0.10) | 2026-08-07 | `RetryPolicy` + `submit(retry_policy=)`; classes include oom/timeout opt-in; jittered backoff; `max_retries=0` fix. |
 | G3 | PROCESSING lease + heartbeat | unreleased (→0.10) | 2026-08-07 | `lease_token` + `lease_expires_at`; heartbeat while running; `reclaim_stale_leases` on startup + poll; token-gated `set_result`. |
 | G6 | Idempotent submit | unreleased (→0.10) | 2026-08-07 | `idempotency_key` on submit/embed + CLI; unique index; find-before-insert + race-safe IntegrityError path. |
+| G9 | Failed-job DLQ + requeue | unreleased (→0.10) | 2026-08-07 | `dlq` / `requeue` CLI; `Hoglah.requeue`; FAILED→QUEUED clears result; web hint on failed detail. |
 
 ---
 
@@ -218,10 +219,9 @@ If resuming without further instruction, default order:
 1. **G10** Per-model concurrency slots  
 2. **G5** Fairness / rate limit  
 3. **G7** Minimal depends_on  
-4. **G9** Failed-job DLQ + requeue  
-5. **G11** Prometheus metrics  
-6. **G8** Optional token streaming  
-7. **G4** Harder in-flight cancel (builds on G3 leases)  
+4. **G11** Prometheus metrics  
+5. **G8** Optional token streaming  
+6. **G4** Harder in-flight cancel (builds on G3 leases)  
 
 Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 
@@ -257,6 +257,7 @@ Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 | 2026-08-07 | Grok CLI session | Closed G3 PROCESSING leases + heartbeat + stale reclaim. |
 | 2026-08-07 | Grok CLI session | Closed G2 RetryPolicy (max/backoff/jitter/retry_on). |
 | 2026-08-07 | Grok CLI session | Closed G6 idempotency_key on submit. |
+| 2026-08-07 | Grok CLI session | Closed G9 failed-job dlq + requeue. |
 
 ---
 

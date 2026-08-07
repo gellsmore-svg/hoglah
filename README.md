@@ -125,6 +125,9 @@ hoglah models --real              # available models
 hoglah show gemma3:1b             # model details (context size, template, ...)
 hoglah clear --status completed --older-than 7 --yes
 hoglah rm <job-id> --yes
+hoglah dlq                        # list failed jobs (inference dead-letter view)
+hoglah requeue <job-id>           # put a failed job back on the queue
+hoglah requeue --all-failed --yes
 hoglah run --real                 # run a foreground worker (dedicated processor)
 hoglah doctor --real              # diagnose setup, backend, transport, connectivity
 ```

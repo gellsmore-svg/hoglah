@@ -159,6 +159,20 @@ class JobStore(Protocol):
         """
         ...
 
+    def requeue(
+        self,
+        job_id: str,
+        *,
+        from_statuses: tuple[JobStatus, ...] | None = None,
+    ) -> bool:
+        """Reset a terminal job to QUEUED for another run (gap G9).
+
+        Clears result, error, and lease fields; leaves the original request
+        intact. Default allowed source status is FAILED only. Returns True if
+        the job was requeued.
+        """
+        ...
+
     def close(self) -> None:
         """Release any resources (e.g. DB connection)."""
         ...
@@ -601,6 +615,35 @@ class SQLiteJobStore:
                     requeued.append(job_id)
             self._conn.commit()
         return requeued
+
+    def requeue(
+        self,
+        job_id: str,
+        *,
+        from_statuses: tuple[JobStatus, ...] | None = None,
+    ) -> bool:
+        """Reset a terminal job to QUEUED (default: FAILED only)."""
+        allowed = from_statuses or (JobStatus.FAILED,)
+        allowed_vals = tuple(s.value for s in allowed)
+        placeholders = ",".join("?" * len(allowed_vals))
+        now = _now_iso()
+        with self._lock:
+            cur = self._conn.execute(
+                f"""
+                UPDATE jobs
+                SET status = ?,
+                    updated_at = ?,
+                    result_json = NULL,
+                    error = NULL,
+                    lease_expires_at = NULL,
+                    lease_token = NULL,
+                    result_published = 0
+                WHERE id = ? AND status IN ({placeholders})
+                """,
+                (JobStatus.QUEUED.value, now, job_id, *allowed_vals),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
 
     def close(self) -> None:
         """Close the connection, under the same lock every query holds.

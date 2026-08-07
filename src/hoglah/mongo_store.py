@@ -361,6 +361,32 @@ class MongoJobStore:
                 requeued.append(job_id)
         return requeued
 
+    def requeue(
+        self,
+        job_id: str,
+        *,
+        from_statuses: tuple[JobStatus, ...] | None = None,
+    ) -> bool:
+        """Reset a terminal job to QUEUED (default: FAILED only)."""
+        allowed = from_statuses or (JobStatus.FAILED,)
+        allowed_vals = [s.value for s in allowed]
+        now = _now_iso()
+        res = self._col.update_one(
+            {"_id": job_id, "status": {"$in": allowed_vals}},
+            {
+                "$set": {
+                    "status": JobStatus.QUEUED.value,
+                    "updated_at": now,
+                    "result": None,
+                    "error": None,
+                    "lease_expires_at": None,
+                    "lease_token": None,
+                    "result_published": False,
+                }
+            },
+        )
+        return res.modified_count > 0 or res.matched_count > 0
+
     def close(self) -> None:
         self._client.close()
 

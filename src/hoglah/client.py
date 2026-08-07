@@ -1171,6 +1171,51 @@ class Hoglah:
         for job_id in requeued:
             logger.info("Recovered interrupted job %s (re-queued for retry)", job_id)
 
+    def requeue(
+        self,
+        job_id: str,
+        *,
+        allow_cancelled: bool = False,
+    ) -> bool:
+        """Put a failed job back on the queue (gap G9).
+
+        Resets status to QUEUED and clears the stored result so a worker will
+        run the original request again. By default only ``failed`` jobs are
+        accepted; pass ``allow_cancelled=True`` to also requeue cancelled jobs.
+        Returns True if the job was requeued.
+        """
+        allowed: tuple[JobStatus, ...] = (JobStatus.FAILED,)
+        if allow_cancelled:
+            allowed = (JobStatus.FAILED, JobStatus.CANCELLED)
+        if not hasattr(self._store, "requeue"):
+            raise NotImplementedError("store does not support requeue")
+        ok = self._store.requeue(job_id, from_statuses=allowed)
+        if ok:
+            logger.info("Requeued job %s", job_id)
+        return ok
+
+    def requeue_failed(
+        self,
+        *,
+        limit: int = 100,
+        tags: list[str] | None = None,
+        allow_cancelled: bool = False,
+    ) -> list[str]:
+        """Bulk-requeue failed (or cancelled) jobs. Returns requeued job ids."""
+        statuses = [JobStatus.FAILED]
+        if allow_cancelled:
+            statuses.append(JobStatus.CANCELLED)
+        requeued: list[str] = []
+        for status in statuses:
+            rows = self._store.list(status=status, tags=tags, limit=limit)
+            for row in rows:
+                if len(requeued) >= limit:
+                    return requeued
+                jid = row["id"]
+                if self.requeue(jid, allow_cancelled=allow_cancelled):
+                    requeued.append(jid)
+        return requeued
+
     def close(self) -> None:
         """Stop worker and close resources."""
         self._worker_running = False
