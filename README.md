@@ -19,6 +19,7 @@ multiple workers and machines when you point it at a shared backend.
   undelivered callbacks are recovered on restart.
 - **Configurable concurrency** — default 1, tune for your hardware.
 - **Per-model slots** — e.g. one 70B job at a time while smaller models share.
+- **Fair multi-agent limits** — concurrent + rate caps per `session_id` or tag.
 - **Lease-based multi-worker reclaim** — PROCESSING jobs hold a heartbeat lease;
   dead workers' jobs are requeued without clobbering live peers.
 - **Context-aware** — auto-detects a model's context window and reports truncation

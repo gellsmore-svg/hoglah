@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Fairness / rate limits (gap G5)** — multi-agent GPU sharing: `session_slots`
+  (concurrent per `metadata.session_id`), `tag_slots`, token-bucket
+  `session_rate_per_minute` / `tag_rates_per_minute`. Worker prefers less-loaded
+  sessions when fairness gates are on. CLI: `hoglah run --session-slots 1
+  --tag-slots 'a=1' --session-rate 30 --tag-rates 'a=6'`.
+
 ## [0.10.0] - 2026-08-07
 
 ### Added

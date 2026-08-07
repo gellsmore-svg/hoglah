@@ -967,6 +967,26 @@ def run(
         "--default-model-slots",
         help="Slot limit for models not listed in --model-slots",
     ),
+    session_slots: int | None = typer.Option(
+        None,
+        "--session-slots",
+        help="Max concurrent jobs per metadata.session_id (gap G5 fairness)",
+    ),
+    tag_slots: str | None = typer.Option(
+        None,
+        "--tag-slots",
+        help="Per-tag concurrency caps, e.g. 'agent-a=1,agent-b=2'",
+    ),
+    session_rate: float | None = typer.Option(
+        None,
+        "--session-rate",
+        help="Max job starts per minute per session_id (token bucket)",
+    ),
+    tag_rates: str | None = typer.Option(
+        None,
+        "--tag-rates",
+        help="Per-tag start rates (jobs/min), e.g. 'agent-a=6,agent-b=12'",
+    ),
 ) -> None:
     """Run the background worker in the foreground (blocks until interrupted).
 
@@ -985,6 +1005,14 @@ def run(
         cfg["model_slots"] = model_slots
     if default_model_slots is not None:
         cfg["default_model_slots"] = default_model_slots
+    if session_slots is not None:
+        cfg["session_slots"] = session_slots
+    if tag_slots is not None:
+        cfg["tag_slots"] = tag_slots
+    if session_rate is not None:
+        cfg["session_rate_per_minute"] = session_rate
+    if tag_rates is not None:
+        cfg["tag_rates_per_minute"] = tag_rates
 
     h = Hoglah(config=cfg, use_real=real)
 

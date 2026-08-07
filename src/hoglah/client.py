@@ -61,6 +61,36 @@ logger = logging.getLogger("hoglah")
 _SHUTDOWN_DRAIN_SECONDS = 2.0
 
 
+class _TokenBucket:
+    """Simple token bucket for job-start rate limits (gap G5)."""
+
+    __slots__ = ("rate_per_sec", "capacity", "tokens", "updated")
+
+    def __init__(self, rate_per_minute: float) -> None:
+        self.rate_per_sec = float(rate_per_minute) / 60.0
+        # Burst ≈ 10s of sustained rate, at least 1 token.
+        self.capacity = max(1.0, float(rate_per_minute) / 6.0)
+        self.tokens = self.capacity
+        self.updated = time.monotonic()
+
+    def _refill(self) -> None:
+        now = time.monotonic()
+        elapsed = max(0.0, now - self.updated)
+        self.updated = now
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate_per_sec)
+
+    def would_allow(self) -> bool:
+        self._refill()
+        return self.tokens >= 1.0
+
+    def try_take(self) -> bool:
+        self._refill()
+        if self.tokens >= 1.0:
+            self.tokens -= 1.0
+            return True
+        return False
+
+
 def _redact_url(url: str) -> str:
     """scheme://host[:port]/… — path/query stripped so logs don't leak endpoints."""
     try:
@@ -239,9 +269,14 @@ class Hoglah:
         # event loop, so cancel() (called from the main thread) can interrupt a
         # running job cross-thread via loop.call_soon_threadsafe(task.cancel).
         self._inflight: dict[str, asyncio.Task] = {}
-        # model name reserved for each in-flight job (G10 slots; includes the
-        # window after task spawn but before claim_for_processing flips status).
+        # Reservation metadata for each in-flight job (G5/G10). Includes the
+        # window after task spawn but before claim flips status to PROCESSING.
+        # Values: {"model": str, "session_id": str|None, "tags": list[str]}
+        self._inflight_meta: dict[str, dict[str, Any]] = {}
+        # Back-compat alias used by older tests / introspectors.
         self._inflight_models: dict[str, str] = {}
+        # Token buckets keyed by "session:<id>" or "tag:<name>" (G5).
+        self._rate_buckets: dict[str, _TokenBucket] = {}
         self._worker_loop_ref: asyncio.AbstractEventLoop | None = None
 
         # Messaging bridge (Kafka ADR-018 / RabbitMQ ADR-019), created below only
@@ -732,17 +767,16 @@ class Hoglah:
                 except Exception:
                     logger.exception("Error reclaiming stale leases")
 
-                # Get a batch of *due* queued jobs (priority + age order is
-                # handled by store). due_only skips delayed/scheduled jobs
-                # whose run_at is still in the future (G1). Larger batch when
-                # per-model slots are on so a full model does not hide others.
-                slots_on = bool(self.config.model_slots) or (
-                    self.config.default_model_slots is not None
-                )
-                poll_limit = 50 if slots_on else 10
+                # Get a batch of *due* queued jobs. due_only skips delayed jobs
+                # (G1). Larger batch + fair re-order when model/session/tag
+                # gates are on so a saturated key does not hide others.
+                fairness_on = self._fairness_enabled()
+                poll_limit = 50 if fairness_on else 10
                 queued = self._store.list(
                     status=JobStatus.QUEUED, limit=poll_limit, due_only=True
                 )
+                if fairness_on:
+                    queued = self._fairness_order(queued)
                 for row in queued:
                     if not self._worker_running:
                         break
@@ -754,23 +788,21 @@ class Hoglah:
                     # cancel() target the wrong task.
                     if job_id in self._inflight:
                         continue
-                    model = (row.get("request") or {}).get("model") or ""
-                    # Reserve the model slot before acquiring the global
-                    # semaphore so two poll iterations cannot oversubscribe a
-                    # model while one is blocked on sem.acquire (G10).
-                    if not self._try_reserve_model_slot(job_id, model):
+                    # Reserve model/session/tag slots + rate tokens before the
+                    # global semaphore (G5/G10).
+                    if not self._try_reserve_job(job_id, row):
                         continue
                     try:
                         await sem.acquire()
                     except Exception:
-                        self._inflight_models.pop(job_id, None)
+                        self._release_job_reservation(job_id)
                         raise
                     task = asyncio.create_task(self._process_job(job_id, sem))
                     self._inflight[job_id] = task
 
                     def _done(_t: asyncio.Task, jid: str = job_id) -> None:
                         self._inflight.pop(jid, None)
-                        self._inflight_models.pop(jid, None)
+                        self._release_job_reservation(jid)
 
                     task.add_done_callback(_done)
 
@@ -956,6 +988,40 @@ class Hoglah:
         except asyncio.CancelledError:
             return
 
+    def _fairness_enabled(self) -> bool:
+        c = self.config
+        return bool(
+            c.model_slots
+            or c.default_model_slots is not None
+            or c.session_slots is not None
+            or c.tag_slots
+            or c.session_rate_per_minute is not None
+            or c.tag_rates_per_minute
+        )
+
+    @staticmethod
+    def _job_dims(row: dict[str, Any]) -> tuple[str, str | None, list[str]]:
+        req = row.get("request") or {}
+        model = req.get("model") or ""
+        meta = req.get("metadata") or {}
+        session_id = meta.get("session_id")
+        if session_id is not None:
+            session_id = str(session_id)
+        tags = list(req.get("tags") or row.get("tags") or [])
+        return model, session_id, tags
+
+    def _fairness_order(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Prefer sessions with fewer in-flight jobs (fair multi-agent share)."""
+
+        def key(row: dict[str, Any]) -> tuple[Any, ...]:
+            _model, session_id, _tags = self._job_dims(row)
+            sess_load = self._dim_usage("session", session_id) if session_id else 0
+            priority = -(row.get("priority") or 0)
+            created = row.get("created_at") or ""
+            return (sess_load, priority, created)
+
+        return sorted(rows, key=key)
+
     def _slot_limit_for_model(self, model: str) -> int | None:
         """Per-model max in-flight jobs, or None if unlimited (gap G10)."""
         slots = self.config.model_slots or {}
@@ -963,37 +1029,112 @@ class Hoglah:
             return int(slots[model])
         return self.config.default_model_slots
 
-    def _model_usage(self, model: str) -> int:
-        """In-flight count for ``model`` (local reservations + peer PROCESSING)."""
-        local = sum(1 for m in self._inflight_models.values() if m == model)
+    def _dim_usage(self, kind: str, value: str | None) -> int:
+        """In-flight count for a dimension (local + peer PROCESSING)."""
+        if not value:
+            return 0
+        local = 0
+        for meta in self._inflight_meta.values():
+            if kind == "model" and meta.get("model") == value:
+                local += 1
+            elif kind == "session" and meta.get("session_id") == value:
+                local += 1
+            elif kind == "tag" and value in (meta.get("tags") or []):
+                local += 1
         peer = 0
         try:
             for row in self._store.list(status=JobStatus.PROCESSING, limit=200):
                 jid = row["id"]
-                if jid in self._inflight_models:
+                if jid in self._inflight_meta:
                     continue
-                req = row.get("request") or {}
-                if req.get("model") == model:
+                model, session_id, tags = self._job_dims(row)
+                if kind == "model" and model == value:
+                    peer += 1
+                elif kind == "session" and session_id == value:
+                    peer += 1
+                elif kind == "tag" and value in tags:
                     peer += 1
         except Exception:
-            logger.exception("Failed counting PROCESSING jobs for model slots")
+            logger.exception("Failed counting PROCESSING jobs for fairness dims")
         return local + peer
 
-    def _try_reserve_model_slot(self, job_id: str, model: str) -> bool:
-        """Atomically (in-process) reserve a model slot, or return False."""
-        limit = self._slot_limit_for_model(model)
-        if limit is None:
-            self._inflight_models[job_id] = model
-            return True
-        if self._model_usage(model) >= limit:
+    def _model_usage(self, model: str) -> int:
+        return self._dim_usage("model", model)
+
+    def _bucket(self, key: str, rate_per_minute: float) -> _TokenBucket:
+        b = self._rate_buckets.get(key)
+        if b is None:
+            b = _TokenBucket(rate_per_minute)
+            self._rate_buckets[key] = b
+        return b
+
+    def _try_reserve_job(self, job_id: str, row: dict[str, Any]) -> bool:
+        """Reserve model/session/tag slots and rate tokens, or return False."""
+        model, session_id, tags = self._job_dims(row)
+
+        # --- concurrency caps ---
+        model_limit = self._slot_limit_for_model(model)
+        if model_limit is not None and self._dim_usage("model", model) >= model_limit:
             return False
+        if (
+            session_id
+            and self.config.session_slots is not None
+            and self._dim_usage("session", session_id) >= self.config.session_slots
+        ):
+            return False
+        for tag in tags:
+            limit = (self.config.tag_slots or {}).get(tag)
+            if limit is not None and self._dim_usage("tag", tag) >= int(limit):
+                return False
+
+        # --- rate limits (token bucket; check all, then charge all) ---
+        rate_keys: list[tuple[str, float]] = []
+        if session_id and self.config.session_rate_per_minute is not None:
+            rate_keys.append(
+                (f"session:{session_id}", float(self.config.session_rate_per_minute))
+            )
+        for tag in tags:
+            rate = (self.config.tag_rates_per_minute or {}).get(tag)
+            if rate is not None:
+                rate_keys.append((f"tag:{tag}", float(rate)))
+        buckets = [self._bucket(key, rate) for key, rate in rate_keys]
+        if any(not b.would_allow() for b in buckets):
+            return False
+        for b in buckets:
+            if not b.try_take():
+                return False
+
+        meta = {"model": model, "session_id": session_id, "tags": tags}
+        self._inflight_meta[job_id] = meta
         self._inflight_models[job_id] = model
-        # Re-check after reserve in case a peer claim landed mid-check.
-        if self._model_usage(model) > limit:
-            self._inflight_models.pop(job_id, None)
+
+        # Re-check concurrency after reserve (peer race).
+        if model_limit is not None and self._dim_usage("model", model) > model_limit:
+            self._release_job_reservation(job_id)
             return False
+        if (
+            session_id
+            and self.config.session_slots is not None
+            and self._dim_usage("session", session_id) > self.config.session_slots
+        ):
+            self._release_job_reservation(job_id)
+            return False
+        for tag in tags:
+            limit = (self.config.tag_slots or {}).get(tag)
+            if limit is not None and self._dim_usage("tag", tag) > int(limit):
+                self._release_job_reservation(job_id)
+                return False
         return True
 
+    def _release_job_reservation(self, job_id: str) -> None:
+        self._inflight_meta.pop(job_id, None)
+        self._inflight_models.pop(job_id, None)
+
+    def _try_reserve_model_slot(self, job_id: str, model: str) -> bool:
+        """Backward-compatible helper used by tests; prefers full reservation."""
+        return self._try_reserve_job(
+            job_id, {"request": {"model": model, "metadata": {}, "tags": []}}
+        )
     async def _execute_with_retries(self, job_id: str, request: JobRequest) -> JobResult:
         """Run the Ollama call under the job's RetryPolicy (gap G2).
 

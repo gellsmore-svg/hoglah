@@ -107,6 +107,7 @@ Update checkboxes when verifying against code.
 | Idempotent submit | ✅ | `idempotency_key` unique index (≠ bridge correlation_id) |
 | Failed-job DLQ + requeue | ✅ | `hoglah dlq` / `requeue`; store reset to QUEUED |
 | Per-model concurrency slots | ✅ | `model_slots` / `default_model_slots` under global concurrency |
+| Fairness / rate limits | ✅ | session/tag slots + token-bucket start rates |
 
 ---
 
@@ -127,7 +128,7 @@ Legend: **Y** yes · **P** partial · **N** no · **N/A** wrong layer
 | Cancel in-flight | P | P | P | P | P | P |
 | Worker lease / reclaim | **Y** | N | P | Y | P | N |
 | Delayed / scheduled / cron | **P** (delay/run_at; no cron) | P | Y | P | **Y** | P |
-| Rate limiting / quotas | **N** | N | P | **Y** | Y | **Y** |
+| Rate limiting / quotas | **P** (session/tag slots + token bucket) | N | P | **Y** | Y | **Y** |
 | Unique / dedupe jobs | **Y** (`idempotency_key`) | N | P | P | P | P |
 | Chains / chords / DAG | **N** | N | P | P | **Y** | N |
 | Dead-letter (broker poison) | Y | P | P | Y | Y | P |
@@ -167,7 +168,6 @@ When closing, move the row to §7 with date + version.
 | ID | Gap | Status | Why it matters | Suggested cut |
 |---|---|---|---|---|
 | G4 | Harder in-flight cancel | open | Cancel often only affects queued | Coordinate with lease + adapter cancel |
-| G5 | Rate limits / fairness | open | Many agents share one GPU | Token bucket per tag/session; per-model slots |
 
 ### P1 — Production local estate
 
@@ -210,6 +210,7 @@ When closing, move the row to §7 with date + version.
 | G6 | Idempotent submit | 0.10.0 | 2026-08-07 | `idempotency_key` unique index. |
 | G9 | Failed-job DLQ + requeue | 0.10.0 | 2026-08-07 | `dlq` / `requeue`; FAILED→QUEUED. |
 | G10 | Per-model concurrency slots | 0.10.0 | 2026-08-07 | `model_slots` / `default_model_slots`; peer PROCESSING counted. |
+| G5 | Fairness / rate limits | unreleased (→0.10.1) | 2026-08-07 | session/tag concurrent slots + token-bucket rates; fair session order. |
 
 ---
 
@@ -217,11 +218,10 @@ When closing, move the row to §7 with date + version.
 
 If resuming without further instruction, default order:
 
-1. **G5** Fairness / rate limit (token bucket per tag/session)  
-2. **G7** Minimal depends_on  
-3. **G11** Prometheus metrics  
-4. **G8** Optional token streaming  
-5. **G4** Harder in-flight cancel (builds on G3 leases)  
+1. **G7** Minimal depends_on  
+2. **G11** Prometheus metrics  
+3. **G8** Optional token streaming  
+4. **G4** Harder in-flight cancel (builds on G3 leases)  
 
 Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 
@@ -259,6 +259,7 @@ Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 | 2026-08-07 | Grok CLI session | Closed G6 idempotency_key on submit. |
 | 2026-08-07 | Grok CLI session | Closed G9 failed-job dlq + requeue. |
 | 2026-08-07 | Grok CLI session | Closed G10 model slots; cut 0.10.0. |
+| 2026-08-07 | Grok CLI session | Closed G5 session/tag fairness + rate limits. |
 
 ---
 

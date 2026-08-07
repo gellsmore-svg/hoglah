@@ -197,6 +197,30 @@ class HoglahSettings(BaseSettings):
         description="Slot limit for models not listed in model_slots. None = unlimited.",
     )
 
+    # Fairness / rate limits (gap G5). Many agents share one GPU: cap concurrent
+    # work and start-rate per session (metadata.session_id) or tag.
+    # Env: HOGLAH_TAG_SLOTS=agent-a=1,agent-b=2
+    #      HOGLAH_TAG_RATES_PER_MINUTE=agent-a=6,agent-b=12
+    session_slots: int | None = Field(
+        default=None,
+        ge=1,
+        description="Max concurrent PROCESSING jobs per metadata.session_id. "
+        "None = unlimited. Jobs without session_id are unrestricted by this.",
+    )
+    tag_slots: dict[str, int] = Field(
+        default_factory=dict,
+        description="Max concurrent PROCESSING jobs for each tag. Empty = no tag caps.",
+    )
+    session_rate_per_minute: float | None = Field(
+        default=None,
+        gt=0,
+        description="Token-bucket start rate per session_id (jobs/minute). None = no rate limit.",
+    )
+    tag_rates_per_minute: dict[str, float] = Field(
+        default_factory=dict,
+        description="Token-bucket start rate per tag (jobs/minute). Empty = no tag rates.",
+    )
+
     # Ollama connection
     ollama_host: str | None = Field(
         default=None,
@@ -293,9 +317,8 @@ class HoglahSettings(BaseSettings):
             return [h.strip() for h in v.split(",") if h.strip()]
         return v
 
-    @field_validator("model_slots", mode="before")
-    @classmethod
-    def _parse_model_slots(cls, v: Any) -> Any:
+    @staticmethod
+    def _parse_named_int_map(v: Any, *, field: str) -> Any:
         """Accept dict or ``name=n,name=n`` / JSON object strings from env."""
         if v is None or v == "":
             return {}
@@ -310,7 +333,7 @@ class HoglahSettings(BaseSettings):
 
                 parsed = json.loads(s)
                 if not isinstance(parsed, dict):
-                    raise ValueError("model_slots JSON must be an object")
+                    raise ValueError(f"{field} JSON must be an object")
                 return {str(k): int(val) for k, val in parsed.items()}
             out: dict[str, int] = {}
             for part in s.split(","):
@@ -319,18 +342,65 @@ class HoglahSettings(BaseSettings):
                     continue
                 if "=" not in part:
                     raise ValueError(
-                        f"model_slots entry {part!r} must be model=N (e.g. gemma3:1b=2)"
+                        f"{field} entry {part!r} must be name=N (e.g. gemma3:1b=2)"
                     )
                 name, _, num = part.partition("=")
                 name = name.strip()
                 if not name:
-                    raise ValueError("model_slots entry has empty model name")
+                    raise ValueError(f"{field} entry has empty name")
                 n = int(num.strip())
                 if n < 1:
-                    raise ValueError(f"model_slots for {name!r} must be >= 1")
+                    raise ValueError(f"{field} for {name!r} must be >= 1")
                 out[name] = n
             return out
         return v
+
+    @staticmethod
+    def _parse_named_float_map(v: Any, *, field: str) -> Any:
+        if v is None or v == "":
+            return {}
+        if isinstance(v, dict):
+            return {str(k): float(val) for k, val in v.items()}
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return {}
+            if s.startswith("{"):
+                import json
+
+                parsed = json.loads(s)
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"{field} JSON must be an object")
+                return {str(k): float(val) for k, val in parsed.items()}
+            out: dict[str, float] = {}
+            for part in s.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "=" not in part:
+                    raise ValueError(
+                        f"{field} entry {part!r} must be name=rate (e.g. agent=6)"
+                    )
+                name, _, num = part.partition("=")
+                name = name.strip()
+                if not name:
+                    raise ValueError(f"{field} entry has empty name")
+                rate = float(num.strip())
+                if rate <= 0:
+                    raise ValueError(f"{field} for {name!r} must be > 0")
+                out[name] = rate
+            return out
+        return v
+
+    @field_validator("model_slots", "tag_slots", mode="before")
+    @classmethod
+    def _parse_int_slot_maps(cls, v: Any, info: Any) -> Any:
+        return cls._parse_named_int_map(v, field=getattr(info, "field_name", "slots"))
+
+    @field_validator("tag_rates_per_minute", mode="before")
+    @classmethod
+    def _parse_tag_rates(cls, v: Any) -> Any:
+        return cls._parse_named_float_map(v, field="tag_rates_per_minute")
 
     def ensure_dirs(self) -> None:
         """Create parent directory for db_path (and output_dir if set)."""
@@ -354,6 +424,10 @@ class HoglahSettings(BaseSettings):
             "heartbeat_interval_seconds": self.heartbeat_interval_seconds,
             "model_slots": dict(self.model_slots),
             "default_model_slots": self.default_model_slots,
+            "session_slots": self.session_slots,
+            "tag_slots": dict(self.tag_slots),
+            "session_rate_per_minute": self.session_rate_per_minute,
+            "tag_rates_per_minute": dict(self.tag_rates_per_minute),
             "ollama_host": self.ollama_host,
             "ollama_hosts": list(self.ollama_hosts),
             "output_dir": str(self.output_dir) if self.output_dir else None,
