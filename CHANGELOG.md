@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-08-08
+
+### Fixed
+- CI workflow validity: GHA service containers do not support a custom
+  `command` key (Redpanda entry broke the whole workflow). CI now runs
+  Mongo/Redis/RabbitMQ integration tests with stock images; Kafka remains on
+  fake-transport unit tests + optional `RUN_KAFKA_TESTS`.
+
 ## [0.10.4] - 2026-08-08
 
 ### Fixed

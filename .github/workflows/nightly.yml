@@ -14,11 +14,8 @@ jobs:
         image: redis:7
         ports: ["6379:6379"]
       rabbitmq:
-        image: rabbitmq:3-management
+        image: rabbitmq:3
         ports: ["5672:5672"]
-      redpanda:
-        image: docker.redpanda.com/redpandadata/redpanda:v24.2.4
-        ports: ["9092:9092"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,7 +26,5 @@ jobs:
           RUN_MONGO_TESTS: "1"
           RUN_REDIS_TESTS: "1"
           RUN_RABBITMQ_TESTS: "1"
-          RUN_KAFKA_TESTS: "1"
           HOGLAH_MONGO_URI: mongodb://localhost:27017
           HOGLAH_REDIS_URL: redis://localhost:6379/0
-          HOGLAH_RABBITMQ_URL: amqp://guest:guest@localhost:5672/
