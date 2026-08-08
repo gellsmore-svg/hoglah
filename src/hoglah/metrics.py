@@ -70,19 +70,36 @@ class MetricsRegistry:
         total = int(stats.get("total_jobs", sum(int(v) for v in counts.values()) if counts else 0))
         lines.append(f"hoglah_jobs{_labels(status='total')} {total}")
 
-        lines.append("# HELP hoglah_jobs_submitted_total Jobs accepted by submit().")
+        # Process-local counters (only non-zero in the worker process that
+        # incremented them). CLI `hoglah metrics` and `hoglah serve` run with
+        # start_worker=False, so they report 0 here — scrapers should target
+        # `hoglah run` or use the store gauges above (review F2).
+        lines.append(
+            "# HELP hoglah_jobs_submitted_total Jobs accepted by submit() in this process."
+        )
         lines.append("# TYPE hoglah_jobs_submitted_total counter")
         lines.append(
             f"hoglah_jobs_submitted_total {self._counter_value('hoglah_jobs_submitted_total')}"
         )
 
-        lines.append("# HELP hoglah_jobs_terminal_total Jobs reaching a terminal status.")
+        lines.append(
+            "# HELP hoglah_jobs_terminal_total Terminal jobs observed in this process."
+        )
         lines.append("# TYPE hoglah_jobs_terminal_total counter")
         for status in ("completed", "failed", "cancelled"):
             lines.append(
                 f"hoglah_jobs_terminal_total{_labels(status=status)} "
                 f"{self._counter_value('hoglah_jobs_terminal_total', status=status)}"
             )
+        # Store-derived terminal gauges — always correct for the shared DB even
+        # when scraped from a non-worker process.
+        lines.append(
+            "# HELP hoglah_jobs_terminal_store Jobs currently terminal in the store (gauge)."
+        )
+        lines.append("# TYPE hoglah_jobs_terminal_store gauge")
+        for status in ("completed", "failed", "cancelled"):
+            n = int(counts.get(status, 0))
+            lines.append(f"hoglah_jobs_terminal_store{_labels(status=status)} {n}")
 
         lines.append("# HELP hoglah_job_requeues_total Operator or bulk requeues.")
         lines.append("# TYPE hoglah_job_requeues_total counter")

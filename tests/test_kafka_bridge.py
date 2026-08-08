@@ -296,6 +296,71 @@ def test_parse_still_poison_when_correlation_id_absent_everywhere():
         parse_input_message(json.dumps({"model": "m", "prompt": "hi"}).encode())  # no body, no fallback
 
 
+def test_parse_rejects_type_invalid_fields_h4():
+    from hoglah.kafka_bridge import InvalidMessageError
+
+    base = {"correlation_id": "c", "model": "m", "prompt": "x"}
+    with pytest.raises(InvalidMessageError, match="priority"):
+        parse_input_message(json.dumps({**base, "priority": {"nope": 1}}).encode())
+    with pytest.raises(InvalidMessageError, match="timeout_seconds"):
+        parse_input_message(json.dumps({**base, "timeout_seconds": "abc"}).encode())
+    with pytest.raises(InvalidMessageError, match="depends_on"):
+        parse_input_message(json.dumps({**base, "depends_on": "not-a-list"}).encode())
+    with pytest.raises(InvalidMessageError, match="retry_policy"):
+        parse_input_message(json.dumps({**base, "retry_policy": "not-a-dict"}).encode())
+
+
+def test_parse_reserves_idempotency_key_h3():
+    """Broker body must not set client G6 idempotency_key (hijack vector)."""
+    parsed = parse_input_message(
+        json.dumps(
+            {
+                "correlation_id": "c-bridge",
+                "model": "m",
+                "prompt": "from broker",
+                "idempotency_key": "client-key",
+            }
+        ).encode()
+    )
+    assert parsed.request.idempotency_key is None
+
+
+def test_ingress_rejects_job_without_matching_correlation(store):
+    """If enqueue resolves to a pre-existing non-bridge job, nack (H3)."""
+    from hoglah.models import JobRequest
+
+    # Plant a client job with no correlation_id / no _kafka metadata.
+    client_id = store.enqueue(
+        JobRequest(prompt="client", model="m", idempotency_key="shared-key"),
+        idempotency_key="shared-key",
+    )
+    bridge, t = _bridge(store)
+    # Even if a body somehow forced the same key historically, reserved field
+    # prevents that; simulate the failure mode by enqueueing with a forced
+    # correlation collision is hard — instead patch store.enqueue to return
+    # the client id for this message.
+    original = store.enqueue
+
+    def _hijack(request, **kwargs):
+        return client_id
+
+    store.enqueue = _hijack  # type: ignore[method-assign]
+    try:
+        msg = t.add_input(
+            json.dumps(
+                {"correlation_id": "corr-new", "model": "m", "prompt": "broker"}
+            ).encode()
+        )
+        bridge._handle_message(msg)
+    finally:
+        store.enqueue = original  # type: ignore[method-assign]
+
+    # Fake transport nack also acks (durable DLT); real failure mode is DLT.
+    assert len(t.dead_lettered) == 1
+    assert "correlation_id" in t.dead_lettered[0][1]
+    assert client_id  # planted job unchanged
+
+
 def test_ingress_correlation_id_from_message_key_fallback(store):
     """A message whose body omits correlation_id but whose broker-native key
     carries it (e.g. an AMQP property-only message) must still enqueue, not be

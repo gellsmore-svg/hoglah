@@ -71,3 +71,14 @@ def test_stats_counts_failures() -> None:
     stats = q.stats()
     assert stats["failures"] == 1
     assert stats["queued"] == 0
+    q.close()
+
+
+def test_close_stops_accepting_work_m8() -> None:
+    q = SessionPriorityQueue(workers=1)
+    q.close(wait=True, timeout=2.0)
+    try:
+        q.submit(_noop, priority=1)
+        raise AssertionError("submit after close should fail")
+    except RuntimeError as exc:
+        assert "closed" in str(exc).lower()

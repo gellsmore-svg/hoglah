@@ -47,12 +47,26 @@ class JobWitness:
         self._db = db
         self._db_resolved = db is not None
         self._db_lock = threading.Lock()
+        self._mongo_client: Any = None  # owned client, closed on close() (M7)
         self._tracers: "OrderedDict[str, Any]" = OrderedDict()
         self._tracers_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    def close(self) -> None:
+        """Close any MongoClient this witness opened (review M7)."""
+        with self._db_lock:
+            client = self._mongo_client
+            self._mongo_client = None
+            self._db = None
+            self._db_resolved = True
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("galeed MongoClient close failed", exc_info=True)
 
     def _database(self) -> Any:
         """Lazily open the shared trace database (None → bus-only emission).
@@ -71,10 +85,12 @@ class JobWitness:
                 client = MongoClient(
                     self._config.galeed_mongo_uri, serverSelectionTimeoutMS=2000
                 )
+                self._mongo_client = client
                 self._db = client[self._config.galeed_mongo_db]
             except Exception:
                 logger.debug("galeed trace db unavailable; emitting bus-only", exc_info=True)
                 self._db = None
+                self._mongo_client = None
             self._db_resolved = True
             return self._db
 

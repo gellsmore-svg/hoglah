@@ -107,3 +107,32 @@ def test_eval_depends_on_wait_ready_blocked():
     assert h._eval_depends_on([]) == ("ready", None)
     assert h._eval_depends_on(None) == ("ready", None)
     h.close()
+
+
+def test_depends_on_cycle_is_blocked_m5():
+    """A↔B mutual depends_on must fail rather than wait forever."""
+    import json
+
+    db = _temp_db()
+    h = Hoglah(config={"db_path": db}, start_worker=False)
+    a = h.submit(prompt="a", model="m")
+    b = h.submit(prompt="b", model="m", depends_on=[a])
+    # Plant the reverse edge on A's request (simulates cycle after both exist).
+    row_a = h._store.get(a)
+    assert row_a is not None
+    req = dict(row_a["request"])
+    req["depends_on"] = [b]
+    with h._store._lock:
+        h._store._conn.execute(
+            "UPDATE jobs SET request_json = ? WHERE id = ?",
+            (json.dumps(req), a),
+        )
+        h._store._conn.commit()
+    state, err = h._eval_depends_on([b], job_id=a)
+    assert state == "blocked"
+    assert err is not None and "cycle" in err.lower()
+    # Self-reference
+    state2, err2 = h._eval_depends_on([a], job_id=a)
+    assert state2 == "blocked"
+    assert "self" in (err2 or "").lower() or "cycle" in (err2 or "").lower()
+    h.close()

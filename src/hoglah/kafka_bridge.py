@@ -44,7 +44,19 @@ logger = logging.getLogger("hoglah")
 # JobRequest fields we accept verbatim from an input message (top-level or under
 # "options"). Reserved keys are mapped explicitly below.
 _REQ_FIELDS = {f.name for f in dataclasses.fields(JobRequest)}
-_RESERVED = {"kind", "prompt", "messages", "model", "tags", "metadata", "correlation_id", "reply_to"}
+# idempotency_key is reserved so a broker body cannot hijack a client-side G6
+# key (review H3) — messaging idempotency is correlation_id only.
+_RESERVED = {
+    "kind",
+    "prompt",
+    "messages",
+    "model",
+    "tags",
+    "metadata",
+    "correlation_id",
+    "reply_to",
+    "idempotency_key",
+}
 
 
 class InvalidMessageError(ValueError):
@@ -142,13 +154,22 @@ def parse_input_message(
     if options and "options" in _REQ_FIELDS:
         extra.setdefault("options", options)
 
+    # H4: type-validate bridge-supplied fields before JobRequest (dataclass
+    # accepts anything; poison must dead-letter, not reach the worker).
+    extra = _validate_request_extra(extra)
+
+    tags = data.get("tags") or []
+    if not isinstance(tags, list):
+        raise InvalidMessageError("'tags' must be a list")
+    tags = [str(t) for t in tags]
+
     try:
         request = JobRequest(
             kind=data.get("kind", "generate"),
             prompt=prompt,
             messages=messages,
             model=model,
-            tags=data.get("tags") or [],
+            tags=tags,
             # Stash the messaging routing info so egress (live or restart-replay)
             # can address the reply and echo the correlation_id. The key is
             # "_kafka" for backward compatibility with jobs enqueued by v0.5.x.
@@ -159,6 +180,76 @@ def parse_input_message(
         raise InvalidMessageError(f"could not build job request: {exc}") from exc
 
     return ParsedInput(request=request, correlation_id=corr, reply_to=rt)
+
+
+def _validate_request_extra(extra: dict[str, Any]) -> dict[str, Any]:
+    """Coerce or reject JobRequest field values from a broker message (H4)."""
+    out = dict(extra)
+
+    if "priority" in out:
+        try:
+            out["priority"] = int(out["priority"])
+        except (TypeError, ValueError) as exc:
+            raise InvalidMessageError("'priority' must be an int") from exc
+
+    if "timeout_seconds" in out and out["timeout_seconds"] is not None:
+        try:
+            out["timeout_seconds"] = int(out["timeout_seconds"])
+        except (TypeError, ValueError) as exc:
+            raise InvalidMessageError("'timeout_seconds' must be an int") from exc
+
+    if "max_retries" in out:
+        try:
+            out["max_retries"] = int(out["max_retries"])
+        except (TypeError, ValueError) as exc:
+            raise InvalidMessageError("'max_retries' must be an int") from exc
+
+    if "depends_on" in out and out["depends_on"] is not None:
+        deps = out["depends_on"]
+        # Reject strings: a bare str would be iterated by character in the
+        # worker (review H4). Lists only from the broker.
+        if not isinstance(deps, list):
+            raise InvalidMessageError("'depends_on' must be a list of job ids")
+        out["depends_on"] = [str(d).strip() for d in deps if str(d).strip()] or None
+
+    if "retry_policy" in out and out["retry_policy"] is not None:
+        if not isinstance(out["retry_policy"], dict):
+            raise InvalidMessageError("'retry_policy' must be an object")
+
+    if "options" in out and out["options"] is not None:
+        if not isinstance(out["options"], dict):
+            raise InvalidMessageError("'options' must be an object")
+
+    if "num_ctx" in out and out["num_ctx"] is not None:
+        try:
+            out["num_ctx"] = int(out["num_ctx"])
+        except (TypeError, ValueError) as exc:
+            raise InvalidMessageError("'num_ctx' must be an int") from exc
+
+    for float_field in ("temperature", "top_p", "repeat_penalty"):
+        if float_field in out and out[float_field] is not None:
+            try:
+                out[float_field] = float(out[float_field])
+            except (TypeError, ValueError) as exc:
+                raise InvalidMessageError(f"'{float_field}' must be a number") from exc
+
+    if "top_k" in out and out["top_k"] is not None:
+        try:
+            out["top_k"] = int(out["top_k"])
+        except (TypeError, ValueError) as exc:
+            raise InvalidMessageError("'top_k' must be an int") from exc
+
+    if "num_predict" in out and out["num_predict"] is not None:
+        try:
+            out["num_predict"] = int(out["num_predict"])
+        except (TypeError, ValueError) as exc:
+            raise InvalidMessageError("'num_predict' must be an int") from exc
+
+    if "messages" in out and out["messages"] is not None:
+        if not isinstance(out["messages"], list):
+            raise InvalidMessageError("'messages' must be a list")
+
+    return out
 
 
 def build_result_message(result_dict: dict[str, Any], correlation_id: str) -> bytes:
@@ -455,7 +546,33 @@ class MessageBridge:
             return
         # Durable, idempotent enqueue. A crash here (before ack) means the message
         # is redelivered and re-enqueued as a no-op — never duplicated.
-        self._store.enqueue(parsed.request, correlation_id=parsed.correlation_id)
+        job_id = self._store.enqueue(parsed.request, correlation_id=parsed.correlation_id)
+        # H3: refuse to ack when enqueue resolved to a row that is not this
+        # message's correlation (e.g. historical client-key collision). Without
+        # matching _kafka routing metadata the result would never publish and
+        # the caller would wait forever.
+        row = self._store.get(job_id) if hasattr(self._store, "get") else None
+        if row is None or row.get("correlation_id") != parsed.correlation_id:
+            reason = (
+                f"enqueue returned job {job_id} without matching correlation_id "
+                f"{parsed.correlation_id!r}"
+            )
+            logger.warning(
+                "Ingress safety reject from %s[%d]@%d → dead-letter: %s",
+                msg.source, msg.partition, msg.offset, reason,
+            )
+            self._safe_nack(msg, reason)
+            return
+        req_meta = (row.get("request") or {}).get("metadata") or {}
+        kafka_meta = req_meta.get("_kafka") if isinstance(req_meta, dict) else None
+        if not isinstance(kafka_meta, dict) or kafka_meta.get("correlation_id") != parsed.correlation_id:
+            reason = f"job {job_id} lacks _kafka routing for {parsed.correlation_id!r}"
+            logger.warning(
+                "Ingress safety reject from %s[%d]@%d → dead-letter: %s",
+                msg.source, msg.partition, msg.offset, reason,
+            )
+            self._safe_nack(msg, reason)
+            return
         self._safe_ack(msg)
 
     def _safe_ack(self, msg: Message) -> None:

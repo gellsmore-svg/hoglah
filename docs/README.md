@@ -1,6 +1,6 @@
 # Hoglah documentation
 
-**Package:** Hoglah **0.10.2**  
+**Package:** Hoglah **0.10.3**  
 **Repo:** https://github.com/gellsmore-svg/hoglah
 
 ## Start here
@@ -25,6 +25,7 @@ operational recipes.
 | [feature-comparison-and-gaps.md](feature-comparison-and-gaps.md) | Competitor map + living gap checklist |
 | [kafka-bridge-design.md](kafka-bridge-design.md) | Kafka transport design |
 | [rabbitmq-bridge-design.md](rabbitmq-bridge-design.md) | RabbitMQ transport design |
+| [review-2026-08-08.md](review-2026-08-08.md) | Functional + code review of 0.10.2 (actioned in 0.10.3 for H1–H4, F1–F4/F6, M1–M2/M5/M7–M8) |
 
 ## Knowledge bundle (OKF)
 

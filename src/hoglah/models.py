@@ -153,57 +153,86 @@ class RetryPolicy:
 
 
 def classify_error(exc: Exception) -> set[str]:
-    """Map an exception to named retry classes."""
+    """Map an exception to named retry classes.
+
+    Prefer structured signals (exception type, ``status_code`` attribute), then
+    word-boundary / anchored text matches. Substring matching alone is unsafe
+    because messages can embed prompts, model names, and byte counts.
+    """
+    import re
+
     msg = str(exc).lower()
     found: set[str] = set()
+    name = type(exc).__name__.lower()
 
-    if any(
-        x in msg
-        for x in (
-            "connection",
-            "connect",
-            "refused",
-            "reset by peer",
-            "unreachable",
-            "network is unreachable",
-            "name or service not known",
+    # --- structured: HTTP-ish status codes ---------------------------------
+    status_code: int | None = None
+    raw_code = getattr(exc, "status_code", None)
+    if raw_code is None:
+        raw_code = getattr(exc, "status", None)
+    if isinstance(raw_code, int):
+        status_code = raw_code
+    elif isinstance(raw_code, str) and raw_code.isdigit():
+        status_code = int(raw_code)
+    if status_code is None:
+        m = re.search(r"\b([45]\d{2})\b", msg)
+        if m:
+            status_code = int(m.group(1))
+
+    # Permanent model / not-found signals (before generic 5xx → transient).
+    permanent_model = bool(
+        re.search(
+            r"(model\s+not\s+found|file does not exist|pull model manifest|"
+            r"unknown model|no such model)",
+            msg,
+        )
+    )
+    if permanent_model:
+        # Never treat missing-model / pull failures as transient, even if the
+        # transport wrapped them in a 500.
+        return found  # empty → permanent (no retry under default policy)
+
+    if status_code == 429:
+        found.add("rate_limit")
+    elif status_code is not None and 500 <= status_code <= 599:
+        found.add("server")
+    elif status_code is not None and 400 <= status_code <= 499:
+        # Client errors are permanent under the default policy.
+        pass
+
+    # --- connection / network ----------------------------------------------
+    if isinstance(exc, (ConnectionError, ConnectionResetError, BrokenPipeError)) or any(
+        re.search(p, msg)
+        for p in (
+            r"\bconnection\b",
+            r"\bconnect(?:ion)?\s+refused\b",
+            r"\breset by peer\b",
+            r"\bunreachable\b",
+            r"\bnetwork is unreachable\b",
+            r"\bname or service not known\b",
         )
     ):
         found.add("connection")
 
-    if "timeout" in msg or type(exc).__name__.lower().endswith("timeout"):
+    if "timeout" in name or re.search(r"\btimeout\b", msg):
         found.add("timeout")
 
-    if any(x in msg for x in ("rate limit", "rate_limit", "429", "too many requests", "throttl")):
+    if re.search(r"\brate[_\s-]?limit\b", msg) or re.search(r"\btoo many requests\b", msg) or re.search(
+        r"\bthrottl", msg
+    ):
         found.add("rate_limit")
 
-    if any(
-        x in msg
-        for x in (
-            " 500",
-            "500 ",
-            "502",
-            "503",
-            "504",
-            "5xx",
-            "server error",
-            "internal server",
-            "unavailable",
-            "service unavailable",
-        )
-    ) or msg.strip().startswith("500"):
+    if status_code is None and re.search(
+        r"\b(server error|internal server|service unavailable|unavailable)\b", msg
+    ):
         found.add("server")
 
-    if any(
-        x in msg
-        for x in (
-            "out of memory",
-            "oom",
-            "cuda out of memory",
-            "enomem",
-            "memory allocation",
-            "cannot allocate memory",
-        )
+    # OOM — word-boundary only (avoid "mushroom" matching "oom").
+    if re.search(
+        r"(\bout of memory\b|\bcuda out of memory\b|\benomem\b|"
+        r"\bmemory allocation\b|\bcannot allocate memory\b|"
+        r"\bmemory layout cannot be allocated\b|\boom\b)",
+        msg,
     ):
         found.add("oom")
 
@@ -212,7 +241,9 @@ def classify_error(exc: Exception) -> set[str]:
         found.add("transient")
 
     # Context / validation style errors are never transient.
-    if any(x in msg for x in ("context length", "context window", "invalid", "bad request", "400")):
+    if re.search(r"\b(context length|context window|invalid|bad request)\b", msg) or (
+        status_code is not None and 400 <= status_code < 500 and status_code != 429
+    ):
         found.discard("transient")
 
     return found

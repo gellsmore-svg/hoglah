@@ -7,10 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-08-08
+
+### Fixed
+- **F1 / adapters** — trust Ollama `done_reason` for truncation; drop the
+  `"context" in output` false-positive heuristic.
+- **H1 / classify_error** — structured status codes + word-boundary matches;
+  permanent model-pull failures are never `transient` (even when wrapped in 500);
+  no more `"oom"` inside `"mushroom"` or `"400"` inside `"4004"`.
+- **H2 / close()** — join the worker before stopping the messaging bridge so
+  drain-time result publishes still have a live producer.
+- **H3 / kafka ingress** — reserve `idempotency_key` on broker messages; nack
+  when enqueue returns a job without matching `correlation_id` / `_kafka` routing
+  (prevents silent message loss).
+- **H4 / parse_input_message** — type-validate priority, timeout, depends_on,
+  retry_policy, etc. before constructing `JobRequest` (poison → dead-letter).
+- **M1 / config** — dict `model_slots` / `tag_rates_per_minute` enforce the same
+  bounds as env strings (zero no longer wedges jobs forever).
+- **M2 / rate limits** — refund token-bucket charges on reservation rollback.
+- **M5 / depends_on** — detect dependency cycles and self-references; fail the
+  job instead of waiting forever.
+- **M7 / JobWitness** — close owned `MongoClient` on `Hoglah.close()`.
+- **M8 / SessionPriorityQueue** — document real priority-within-key order; add
+  `close()` / `shutdown()` so workers exit.
+- **F4 / CI** — pin ruff rule set (`E4,E7,E9,F`); remove unused imports that
+  failed `ruff check`.
+- **F2 / metrics** — document process-local counters; add
+  `hoglah_jobs_terminal_store` gauges for scrapers that are not the worker.
+- **F6 / idempotency** — log a warning when an existing key is reused with a
+  different prompt.
+
+### Changed
+- Dependency pins: `keturah>=0.4.0`, optional `galeed>=0.3.2` (PyPI-style; aligns
+  with Tirzah 1.15).
+- Filed functional/code review: [docs/review-2026-08-08.md](docs/review-2026-08-08.md).
+
 ### Documentation
 - Human [user guide](docs/user-guide.md) and [AI / agent user guide](docs/ai-user-guide.md).
 - Docs index ([docs/README.md](docs/README.md)) and repo [AGENTS.md](AGENTS.md).
-- README documentation map; OKF index version aligned to 0.10.2.
+- README documentation map; metrics scraper guidance.
 
 ## [0.10.2] - 2026-08-07
 

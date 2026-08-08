@@ -25,6 +25,17 @@ def test_parse_model_slots_from_env_string():
     assert s2.model_slots == {"a": 3}
 
 
+def test_dict_slot_and_rate_maps_reject_zero_m1():
+    """Dict path must enforce the same bounds as the env-string path (M1)."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises((ValidationError, ValueError)):
+        HoglahSettings(model_slots={"m": 0})
+    with pytest.raises((ValidationError, ValueError)):
+        HoglahSettings(tag_rates_per_minute={"t": 0})
+
+
 def test_big_model_limited_while_small_runs():
     """With concurrency=2 and big=1, only one big job runs at a time; small may proceed."""
 

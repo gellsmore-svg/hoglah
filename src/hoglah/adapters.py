@@ -278,18 +278,17 @@ class OllamaAdapter(BaseAdapter):
                 "total": total,
             }
 
-            # Best-effort truncation / completion info from real Ollama responses
-            done_reason = getattr(resp, "done_reason", None) or (resp.get("done_reason") if isinstance(resp, dict) else None)
+            # Trust Ollama's structured done_reason. Do not substring-scan the
+            # output for "context"/"truncat" — that false-positives on prompts
+            # that *discuss* context windows (review F1).
+            done_reason = getattr(resp, "done_reason", None) or (
+                resp.get("done_reason") if isinstance(resp, dict) else None
+            )
+            if done_reason:
+                meta["done_reason"] = done_reason
             if done_reason == "length":
                 meta["truncated"] = True
                 meta["truncation_reason"] = "length"  # hit max tokens / context window
-            elif done_reason:
-                meta["done_reason"] = done_reason
-
-            # Fallback heuristic for cases where done_reason not present
-            if not meta.get("truncated") and ("context" in str(output).lower() or "truncat" in str(output).lower()):
-                meta["truncated"] = True
-                meta["truncation_reason"] = "possible_context_truncation_from_model"
 
             return str(output or ""), usage, meta
 

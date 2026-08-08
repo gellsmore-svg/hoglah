@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import random
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -61,6 +60,27 @@ def test_classify_error_classes():
     assert "transient" not in classes
 
 
+def test_classify_error_negative_cases_review_h1():
+    """False-positive / false-negative cases from the 2026-08-08 review."""
+    # Permanent model pull failure must not be retried as transient, even with 500.
+    permanent = classify_error(
+        RuntimeError("pull model manifest: file does not exist (status code: 500)")
+    )
+    assert "transient" not in permanent
+    assert "server" not in permanent
+
+    # Byte count containing "4004" must not strip transient via a bare "400" match.
+    reset = classify_error(ConnectionError("connection reset by peer after 4004 bytes"))
+    assert "connection" in reset
+    assert "transient" in reset
+
+    # Real Ollama OOM phrasing.
+    assert "oom" in classify_error(RuntimeError("memory layout cannot be allocated"))
+
+    # "oom" inside a model name must not classify as OOM.
+    assert "oom" not in classify_error(RuntimeError("model not found: mushroom-classifier:7b"))
+
+
 def test_should_retry_respects_retry_on():
     default = RetryPolicy()
     assert default.should_retry(ConnectionError("connection reset"))
@@ -110,8 +130,6 @@ def test_submit_persists_retry_policy():
 
 
 def test_worker_retries_transient_then_succeeds():
-    import asyncio
-
     from hoglah.adapters import StubAdapter
 
     class Flaky(StubAdapter):

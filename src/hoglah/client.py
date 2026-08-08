@@ -91,6 +91,11 @@ class _TokenBucket:
             return True
         return False
 
+    def refund(self, n: float = 1.0) -> None:
+        """Return tokens after a failed reservation (review M2)."""
+        self._refill()
+        self.tokens = min(self.capacity, self.tokens + max(0.0, float(n)))
+
 
 def _redact_url(url: str) -> str:
     """scheme://host[:port]/… — path/query stripped so logs don't leak endpoints."""
@@ -440,6 +445,19 @@ class Hoglah:
             existing = self._store.find_by_idempotency_key(idemp)
             if existing is not None:
                 job_id = existing["id"]
+                # F6: same key, different body → still return the old job, but
+                # surface the collision so agent loops can detect silent reuse.
+                try:
+                    prev = (existing.get("request") or {}).get("prompt")
+                    if prompt is not None and prev is not None and str(prev) != str(prompt):
+                        logger.warning(
+                            "Idempotent submit key %r reused with a different prompt "
+                            "(returning existing job %s); original prompt kept",
+                            idemp,
+                            job_id,
+                        )
+                except Exception:  # noqa: BLE001 — logging must not break submit
+                    pass
                 if direct_cb is not None:
                     self._direct_callbacks[job_id] = direct_cb
                 return job_id
@@ -815,7 +833,8 @@ class Hoglah:
                         continue
                     # G7: wait for depends_on, or fail if a dependency is dead.
                     dep_state, dep_err = self._eval_depends_on(
-                        (row.get("request") or {}).get("depends_on")
+                        (row.get("request") or {}).get("depends_on"),
+                        job_id=job_id,
                     )
                     if dep_state == "wait":
                         continue
@@ -1062,16 +1081,43 @@ class Hoglah:
         except asyncio.CancelledError:
             return
 
+    def _depends_on_cycle(self, job_id: str, depends_on: list[str] | None) -> bool:
+        """True if ``depends_on`` (transitively) includes ``job_id`` (review M5)."""
+        if not depends_on or not job_id:
+            return False
+        seen: set[str] = set()
+        stack = [str(d).strip() for d in depends_on if str(d).strip()]
+        while stack:
+            dep = stack.pop()
+            if dep == job_id:
+                return True
+            if dep in seen:
+                continue
+            seen.add(dep)
+            row = self._store.get(dep)
+            if row is None:
+                continue
+            more = (row.get("request") or {}).get("depends_on") or []
+            stack.extend(str(d).strip() for d in more if str(d).strip())
+        return False
+
     def _eval_depends_on(
-        self, depends_on: list[str] | None
+        self,
+        depends_on: list[str] | None,
+        *,
+        job_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Return (ready|wait|blocked, error). Gap G7."""
         if not depends_on:
             return "ready", None
+        if job_id and self._depends_on_cycle(job_id, depends_on):
+            return "blocked", f"dependency cycle involving {job_id}"
         for dep_id in depends_on:
             dep_id = str(dep_id).strip()
             if not dep_id:
                 continue
+            if job_id and dep_id == job_id:
+                return "blocked", f"dependency {dep_id} is self-referential"
             row = self._store.get(dep_id)
             if row is None:
                 return "blocked", f"dependency {dep_id} not found"
@@ -1235,17 +1281,26 @@ class Hoglah:
         buckets = [self._bucket(key, rate) for key, rate in rate_keys]
         if any(not b.would_allow() for b in buckets):
             return False
+        charged: list[_TokenBucket] = []
         for b in buckets:
             if not b.try_take():
+                for taken in charged:
+                    taken.refund()
                 return False
+            charged.append(b)
 
         meta = {"model": model, "session_id": session_id, "tags": tags}
         self._inflight_meta[job_id] = meta
         self._inflight_models[job_id] = model
 
+        def _rollback_rates() -> None:
+            for taken in charged:
+                taken.refund()
+
         # Re-check concurrency after reserve (peer race).
         if model_limit is not None and self._dim_usage("model", model) > model_limit:
             self._release_job_reservation(job_id)
+            _rollback_rates()
             return False
         if (
             session_id
@@ -1253,11 +1308,13 @@ class Hoglah:
             and self._dim_usage("session", session_id) > self.config.session_slots
         ):
             self._release_job_reservation(job_id)
+            _rollback_rates()
             return False
         for tag in tags:
             limit = (self.config.tag_slots or {}).get(tag)
             if limit is not None and self._dim_usage("tag", tag) > int(limit):
                 self._release_job_reservation(job_id)
+                _rollback_rates()
                 return False
         return True
 
@@ -1573,12 +1630,24 @@ class Hoglah:
         return requeued
 
     def close(self) -> None:
-        """Stop worker and close resources."""
+        """Stop worker and close resources.
+
+        Order is load-bearing (review H2): signal the worker, join it so
+        in-flight jobs finish ``_deliver`` / publish, *then* stop the messaging
+        bridge so result publishes still have a live producer.
+        """
         self._worker_running = False
-        if self._message_bridge is not None:
-            self._message_bridge.stop()
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
+        if self._message_bridge is not None:
+            self._message_bridge.stop()
+        # Optional galeed witness holds a MongoClient pool (review M7).
+        witness = getattr(self, "_witness", None)
+        if witness is not None and hasattr(witness, "close"):
+            try:
+                witness.close()
+            except Exception:  # noqa: BLE001
+                pass
         if hasattr(self._store, "close"):
             self._store.close()
 

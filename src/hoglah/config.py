@@ -319,11 +319,20 @@ class HoglahSettings(BaseSettings):
 
     @staticmethod
     def _parse_named_int_map(v: Any, *, field: str) -> Any:
-        """Accept dict or ``name=n,name=n`` / JSON object strings from env."""
+        """Accept dict or ``name=n,name=n`` / JSON object strings from env.
+
+        Bounds (>= 1) apply to both dict and string paths (review M1).
+        """
         if v is None or v == "":
             return {}
         if isinstance(v, dict):
-            return {str(k): int(val) for k, val in v.items()}
+            out: dict[str, int] = {}
+            for k, val in v.items():
+                n = int(val)
+                if n < 1:
+                    raise ValueError(f"{field} for {str(k)!r} must be >= 1")
+                out[str(k)] = n
+            return out
         if isinstance(v, str):
             s = v.strip()
             if not s:
@@ -334,8 +343,8 @@ class HoglahSettings(BaseSettings):
                 parsed = json.loads(s)
                 if not isinstance(parsed, dict):
                     raise ValueError(f"{field} JSON must be an object")
-                return {str(k): int(val) for k, val in parsed.items()}
-            out: dict[str, int] = {}
+                return HoglahSettings._parse_named_int_map(parsed, field=field)
+            out = {}
             for part in s.split(","):
                 part = part.strip()
                 if not part:
@@ -357,10 +366,17 @@ class HoglahSettings(BaseSettings):
 
     @staticmethod
     def _parse_named_float_map(v: Any, *, field: str) -> Any:
+        """Accept dict or env string; rates must be > 0 on every path (M1)."""
         if v is None or v == "":
             return {}
         if isinstance(v, dict):
-            return {str(k): float(val) for k, val in v.items()}
+            out: dict[str, float] = {}
+            for k, val in v.items():
+                rate = float(val)
+                if rate <= 0:
+                    raise ValueError(f"{field} for {str(k)!r} must be > 0")
+                out[str(k)] = rate
+            return out
         if isinstance(v, str):
             s = v.strip()
             if not s:
@@ -371,8 +387,8 @@ class HoglahSettings(BaseSettings):
                 parsed = json.loads(s)
                 if not isinstance(parsed, dict):
                     raise ValueError(f"{field} JSON must be an object")
-                return {str(k): float(val) for k, val in parsed.items()}
-            out: dict[str, float] = {}
+                return HoglahSettings._parse_named_float_map(parsed, field=field)
+            out = {}
             for part in s.split(","):
                 part = part.strip()
                 if not part:
