@@ -110,7 +110,8 @@ def _redact_url(url: str) -> str:
 
 def _callback_url_allowed(url: str, *, allow_private: bool) -> tuple[bool, str]:
     """SSRF guard for outbound callback POSTs: http(s) only, and private/
-    loopback/link-local targets are refused unless explicitly allowed."""
+    loopback/link-local/unspecified/multicast targets are refused unless
+    explicitly allowed. Re-checked on every redirect hop (review M9)."""
     import ipaddress
     import socket
     from urllib.parse import urlsplit
@@ -136,9 +137,34 @@ def _callback_url_allowed(url: str, *, allow_private: bool) -> tuple[bool, str]:
             ip = ipaddress.ip_address(address)
         except ValueError:
             continue
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_unspecified
+            or ip.is_multicast
+        ):
             return False, f"resolves to non-public address {address}"
     return True, "ok"
+
+
+class _ScreeningRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-screen every redirect target with the SSRF guard (review M9)."""
+
+    def __init__(self, *, allow_private: bool) -> None:
+        super().__init__()
+        self._allow_private = allow_private
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        allowed, reason = _callback_url_allowed(
+            newurl, allow_private=self._allow_private
+        )
+        if not allowed:
+            raise urllib.error.URLError(
+                f"callback redirect blocked ({reason}): {_redact_url(newurl)}"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _run_async(coro_factory):
@@ -818,8 +844,16 @@ class Hoglah:
                 queued = self._store.list(
                     status=JobStatus.QUEUED, limit=poll_limit, due_only=True
                 )
+                # Snapshot PROCESSING once per poll for fairness (M3/M4): sort
+                # keys and reservations share the same peer view, no per-dim
+                # full-table scan and no silent 200-row undercount.
+                processing_snap = (
+                    self._processing_snapshot() if fairness_on else None
+                )
                 if fairness_on:
-                    queued = self._fairness_order(queued)
+                    queued = self._fairness_order(
+                        queued, processing=processing_snap
+                    )
                 for row in queued:
                     if not self._worker_running:
                         break
@@ -843,7 +877,9 @@ class Hoglah:
                         continue
                     # Reserve model/session/tag slots + rate tokens before the
                     # global semaphore (G5/G10).
-                    if not self._try_reserve_job(job_id, row):
+                    if not self._try_reserve_job(
+                        job_id, row, processing=processing_snap
+                    ):
                         continue
                     try:
                         await sem.acquire()
@@ -1191,12 +1227,33 @@ class Hoglah:
         tags = list(req.get("tags") or row.get("tags") or [])
         return model, session_id, tags
 
-    def _fairness_order(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _processing_snapshot(self) -> list[dict[str, Any]]:
+        """All PROCESSING rows (unlimited) for one fairness poll (M3/M4)."""
+        try:
+            return self._store.list(status=JobStatus.PROCESSING, limit=None)
+        except TypeError:
+            # Older store protocol without limit=None.
+            return self._store.list(status=JobStatus.PROCESSING, limit=10_000)
+        except Exception:
+            logger.exception("Failed loading PROCESSING snapshot for fairness")
+            return []
+
+    def _fairness_order(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        processing: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Prefer sessions with fewer in-flight jobs (fair multi-agent share)."""
+        snap = processing if processing is not None else self._processing_snapshot()
 
         def key(row: dict[str, Any]) -> tuple[Any, ...]:
             _model, session_id, _tags = self._job_dims(row)
-            sess_load = self._dim_usage("session", session_id) if session_id else 0
+            sess_load = (
+                self._dim_usage("session", session_id, processing=snap)
+                if session_id
+                else 0
+            )
             priority = -(row.get("priority") or 0)
             created = row.get("created_at") or ""
             return (sess_load, priority, created)
@@ -1210,7 +1267,13 @@ class Hoglah:
             return int(slots[model])
         return self.config.default_model_slots
 
-    def _dim_usage(self, kind: str, value: str | None) -> int:
+    def _dim_usage(
+        self,
+        kind: str,
+        value: str | None,
+        *,
+        processing: list[dict[str, Any]] | None = None,
+    ) -> int:
         """In-flight count for a dimension (local + peer PROCESSING)."""
         if not value:
             return 0
@@ -1224,7 +1287,12 @@ class Hoglah:
                 local += 1
         peer = 0
         try:
-            for row in self._store.list(status=JobStatus.PROCESSING, limit=200):
+            rows = (
+                processing
+                if processing is not None
+                else self._processing_snapshot()
+            )
+            for row in rows:
                 jid = row["id"]
                 if jid in self._inflight_meta:
                     continue
@@ -1249,23 +1317,35 @@ class Hoglah:
             self._rate_buckets[key] = b
         return b
 
-    def _try_reserve_job(self, job_id: str, row: dict[str, Any]) -> bool:
+    def _try_reserve_job(
+        self,
+        job_id: str,
+        row: dict[str, Any],
+        *,
+        processing: list[dict[str, Any]] | None = None,
+    ) -> bool:
         """Reserve model/session/tag slots and rate tokens, or return False."""
         model, session_id, tags = self._job_dims(row)
+        snap = processing
 
         # --- concurrency caps ---
         model_limit = self._slot_limit_for_model(model)
-        if model_limit is not None and self._dim_usage("model", model) >= model_limit:
+        if model_limit is not None and self._dim_usage(
+            "model", model, processing=snap
+        ) >= model_limit:
             return False
         if (
             session_id
             and self.config.session_slots is not None
-            and self._dim_usage("session", session_id) >= self.config.session_slots
+            and self._dim_usage("session", session_id, processing=snap)
+            >= self.config.session_slots
         ):
             return False
         for tag in tags:
             limit = (self.config.tag_slots or {}).get(tag)
-            if limit is not None and self._dim_usage("tag", tag) >= int(limit):
+            if limit is not None and self._dim_usage(
+                "tag", tag, processing=snap
+            ) >= int(limit):
                 return False
 
         # --- rate limits (token bucket; check all, then charge all) ---
@@ -1298,21 +1378,26 @@ class Hoglah:
                 taken.refund()
 
         # Re-check concurrency after reserve (peer race).
-        if model_limit is not None and self._dim_usage("model", model) > model_limit:
+        if model_limit is not None and self._dim_usage(
+            "model", model, processing=snap
+        ) > model_limit:
             self._release_job_reservation(job_id)
             _rollback_rates()
             return False
         if (
             session_id
             and self.config.session_slots is not None
-            and self._dim_usage("session", session_id) > self.config.session_slots
+            and self._dim_usage("session", session_id, processing=snap)
+            > self.config.session_slots
         ):
             self._release_job_reservation(job_id)
             _rollback_rates()
             return False
         for tag in tags:
             limit = (self.config.tag_slots or {}).get(tag)
-            if limit is not None and self._dim_usage("tag", tag) > int(limit):
+            if limit is not None and self._dim_usage(
+                "tag", tag, processing=snap
+            ) > int(limit):
                 self._release_job_reservation(job_id)
                 _rollback_rates()
                 return False
@@ -1419,6 +1504,7 @@ class Hoglah:
             model=request.model,
             error=last_error or "Unknown execution error",
             parameters=asdict(request),
+            timings={"finished_at": datetime.now(timezone.utc)},  # L5: same as success
             tags=request.tags or [],
             metadata={**(request.metadata or {}), **({"timed_out": True} if timed_out else {})},
             parent_job_id=request.parent_job_id,
@@ -1525,6 +1611,12 @@ class Hoglah:
         timeout = self.config.callback_timeout_seconds
         data = payload.encode("utf-8")
         last_err: str | None = None
+        # Custom opener re-screens every redirect hop (M9).
+        opener = urllib.request.build_opener(
+            _ScreeningRedirectHandler(
+                allow_private=self.config.callback_allow_private_hosts
+            )
+        )
         for attempt in range(attempts):
             try:
                 req = urllib.request.Request(
@@ -1533,7 +1625,7 @@ class Hoglah:
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with opener.open(req, timeout=timeout) as resp:
                     if 200 <= resp.status < 300:
                         logger.debug(
                             "Callback for job %s delivered to %s", job_id, _redact_url(url)

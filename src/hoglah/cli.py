@@ -198,8 +198,12 @@ def metrics(
 ) -> None:
     """Print Prometheus text metrics for the queue (gap G11).
 
-    Scrape with:  curl -s localhost:8781/metrics
-    or pipe this command into a node_exporter textfile collector.
+    Store gauges (``hoglah_jobs``, ``hoglah_jobs_terminal_store``) are correct
+    from this one-shot process. Process counters (submitted/terminal totals,
+    latency) stay zero here — scrape ``hoglah run --metrics-port N`` for live
+    worker counters (review F2).
+
+    Web monitor: ``curl -s localhost:8781/metrics``
     """
     h = _get_hoglah(db)
     try:
@@ -1011,10 +1015,22 @@ def run(
         "--tag-rates",
         help="Per-tag start rates (jobs/min), e.g. 'agent-a=6,agent-b=12'",
     ),
+    metrics_port: int | None = typer.Option(
+        None,
+        "--metrics-port",
+        help="Expose live process counters on http://127.0.0.1:PORT/metrics (review F2)",
+    ),
+    metrics_host: str = typer.Option(
+        "127.0.0.1",
+        "--metrics-host",
+        help="Bind address for --metrics-port (default loopback)",
+    ),
 ) -> None:
     """Run the background worker in the foreground (blocks until interrupted).
 
     Useful for dedicated queue processor processes or during development.
+    Process-local Prometheus counters are only meaningful in this process —
+    scrape ``--metrics-port`` rather than ``hoglah metrics`` / ``hoglah serve``.
     """
     cfg: dict[str, Any] = {}
     if db:
@@ -1039,6 +1055,17 @@ def run(
         cfg["tag_rates_per_minute"] = tag_rates
 
     h = Hoglah(config=cfg, use_real=real)
+    metrics_server = None
+    if metrics_port is not None:
+        from .metrics_server import start_metrics_server
+
+        metrics_server = start_metrics_server(
+            h.metrics_text, host=metrics_host, port=int(metrics_port)
+        )
+        typer.secho(
+            f"Metrics: http://{metrics_host}:{metrics_port}/metrics",
+            fg=typer.colors.GREEN,
+        )
 
     typer.secho("Hoglah worker running (foreground). Press Ctrl-C to stop.", fg=typer.colors.BLUE)
     try:
@@ -1047,6 +1074,11 @@ def run(
     except KeyboardInterrupt:
         typer.secho("\nShutting down...", fg=typer.colors.YELLOW)
     finally:
+        if metrics_server is not None:
+            try:
+                metrics_server.shutdown()
+            except Exception:
+                pass
         h.close()
 
 

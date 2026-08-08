@@ -20,9 +20,9 @@ multiple workers and machines when you point it at a shared backend.
 - **Configurable concurrency** — default 1, tune for your hardware.
 - **Per-model slots** — e.g. one 70B job at a time while smaller models share.
 - **Fair multi-agent limits** — concurrent + rate caps per `session_id` or tag.
-- **Prometheus metrics** — store gauges everywhere; process counters only on the
-  worker process (`hoglah run`). Prefer `hoglah_jobs` / `hoglah_jobs_terminal_store`
-  when scraping `hoglah metrics` or `GET /metrics` on the web monitor.
+- **Prometheus metrics** — store gauges everywhere; live process counters via
+  `hoglah run --metrics-port N` (or `hoglah_jobs` / `hoglah_jobs_terminal_store`
+  when scraping `hoglah metrics` / the web monitor).
 - **Lease-based multi-worker reclaim** — PROCESSING jobs hold a heartbeat lease;
   dead workers' jobs are requeued without clobbering live peers.
 - **Context-aware** — auto-detects a model's context window and reports truncation

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-08-08
+
+### Fixed
+- **M3/M4 / fairness** — snapshot PROCESSING once per poll; unlimited list +
+  `store.count()` so peer caps are exact (no 200-row undercount, no sort-key
+  DB I/O storm).
+- **M6 / store filters** — tags via `json_each` (exact match; `_`/`%` safe);
+  parent via `json_extract` (no LIKE).
+- **M9 / callback SSRF** — re-screen every redirect hop; block unspecified and
+  multicast addresses too.
+- **F2 / metrics** — `hoglah run --metrics-port` exporter serves live process
+  counters; CLI docs clarify store gauges vs worker counters.
+- **F5 / CI** — Mongo, Redis, RabbitMQ, and Redpanda (Kafka) service containers
+  with `RUN_*_TESTS=1` on every push.
+- **L1 / store close** — `_require_open()` on every locked method after close.
+- **L2 / galeed** — probe `record_llm_call` signature before calling; no
+  misleading version warning on unrelated TypeErrors.
+- **L3 / dispatch** — prune and cap `_failed_until` map growth.
+- **L4 / warm affinity** — spillover to a freer cold backend when the warm one
+  is busy.
+- **L5 / FAILED timings** — failed results include `finished_at`.
+- **L6 / tracer LRU** — never evict in-flight job tracers mid-run.
+
+### Added
+- `hoglah.metrics_server.start_metrics_server` for in-process scrapes.
+- Unit tests for store filters, SSRF redirect screening, metrics server,
+  warm spillover, and failed-until pruning.
+
 ## [0.10.3] - 2026-08-08
 
 ### Fixed

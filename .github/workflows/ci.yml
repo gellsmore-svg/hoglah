@@ -13,6 +13,39 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
 
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+      rabbitmq:
+        image: rabbitmq:3
+        ports: ["5672:5672"]
+      # Kafka-compatible broker for RUN_KAFKA_TESTS (review F5).
+      redpanda:
+        image: docker.redpanda.com/redpandadata/redpanda:v24.2.4
+        command:
+          - redpanda
+          - start
+          - --overprovisioned
+          - --smp
+          - "1"
+          - --memory
+          - 512M
+          - --reserve-memory
+          - 0M
+          - --node-id
+          - "0"
+          - --check=false
+          - --kafka-addr
+          - internal://0.0.0.0:9092,external://0.0.0.0:19092
+          - --advertise-kafka-addr
+          - internal://redpanda:9092,external://localhost:19092
+        ports:
+          - 19092:19092
+
     steps:
       - uses: actions/checkout@v5
 
@@ -22,16 +55,48 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
 
-      - name: Install dependencies (including dev + cli extras)
+      - name: Install dependencies (including dev + transport extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,cli]"
+          pip install -e ".[dev,cli,mongo,redis,rabbitmq,kafka,web]"
 
       - name: Lint with ruff
         run: |
           ruff check src tests
 
-      - name: Run tests
+      - name: Wait for service ports
+        run: |
+          python - <<'PY'
+          import socket, time, sys
+          ports = {
+              "mongo": 27017,
+              "redis": 6379,
+              "rabbitmq": 5672,
+              "redpanda/kafka": 19092,
+          }
+          for name, port in ports.items():
+              for _ in range(60):
+                  try:
+                      s = socket.create_connection(("127.0.0.1", port), 1)
+                      s.close()
+                      print(f"ok {name}:{port}")
+                      break
+                  except OSError:
+                      time.sleep(1)
+              else:
+                  sys.exit(f"service not up: {name}:{port}")
+          PY
+
+      - name: Run unit + integration tests (Mongo/Redis/RabbitMQ/Kafka)
+        env:
+          RUN_MONGO_TESTS: "1"
+          RUN_REDIS_TESTS: "1"
+          RUN_RABBITMQ_TESTS: "1"
+          RUN_KAFKA_TESTS: "1"
+          HOGLAH_MONGO_URI: mongodb://localhost:27017
+          HOGLAH_REDIS_URL: redis://localhost:6379/0
+          # Kafka tests default to localhost:9092 — point them at redpanda external.
+          HOGLAH_KAFKA_BOOTSTRAP: localhost:19092
         run: |
           pytest -q --tb=short
 

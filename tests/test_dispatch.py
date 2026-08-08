@@ -106,6 +106,26 @@ def test_failed_backend_is_avoided_on_retry_for_same_model():
     asyncio.run(scenario())
 
 
+def test_warm_spillover_when_warm_backend_is_busy():
+    """L4: prefer a free cold peer when the warm backend is heavily loaded."""
+    pool = BackendPool(
+        [_FakeAdapter("warm"), _FakeAdapter("cold")],
+        warm_spillover=1,
+    )
+    pool._recent[0].appendleft("m")
+    pool._inflight = [2, 0]
+    assert pool._pick("m") == 1  # spill to cold
+    pool._inflight = [0, 0]
+    assert pool._pick("m") == 0  # warm when idle
+
+
+def test_failed_until_prunes_expired_entries():
+    pool = BackendPool([_FakeAdapter("a"), _FakeAdapter("b")])
+    pool._failed_until[("m", 0)] = 0.0  # already expired
+    pool._prune_failed_until(1.0)
+    assert ("m", 0) not in pool._failed_until
+
+
 def test_unwarm_model_falls_back_to_least_loaded():
     pool = BackendPool([_FakeAdapter("a"), _FakeAdapter("b")])
 

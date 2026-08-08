@@ -33,10 +33,22 @@ def _model_name(entry: Any) -> str | None:
     return getattr(entry, "model", None) or getattr(entry, "name", None)
 
 
+# When a warm backend is this busy and a cold peer is freer, spill over (L4).
+_WARM_SPILLOVER_INFLIGHT = 2
+# Bound failure-cooldown map growth (L3).
+_FAILED_UNTIL_MAX = 1024
+
+
 class BackendPool:
     """Warm-affinity, least-loaded dispatch across execution adapters (one per backend)."""
 
-    def __init__(self, adapters: list[Any], warm_capacity: int = 2) -> None:
+    def __init__(
+        self,
+        adapters: list[Any],
+        warm_capacity: int = 2,
+        *,
+        warm_spillover: int = _WARM_SPILLOVER_INFLIGHT,
+    ) -> None:
         if not adapters:
             raise ValueError("BackendPool needs at least one adapter")
         self._adapters = list(adapters)
@@ -47,6 +59,7 @@ class BackendPool:
         # Short per-model failure cooldown. Immediate retries avoid a backend that
         # just failed, but recovered backends automatically re-enter after 30 seconds.
         self._failed_until: dict[tuple[str, int], float] = {}
+        self._warm_spillover = max(1, int(warm_spillover))
 
     def __len__(self) -> int:
         return len(self._adapters)
@@ -68,10 +81,22 @@ class BackendPool:
             d.remove(model)
         d.appendleft(model)  # maxlen evicts the oldest (rightmost)
 
+    def _prune_failed_until(self, now: float) -> None:
+        """Drop expired cooldown entries; hard-cap map size (review L3)."""
+        expired = [k for k, until in self._failed_until.items() if until <= now]
+        for k in expired:
+            self._failed_until.pop(k, None)
+        if len(self._failed_until) > _FAILED_UNTIL_MAX:
+            # Drop the soonest-to-expire extras first.
+            overflow = sorted(self._failed_until.items(), key=lambda kv: kv[1])
+            for k, _ in overflow[: len(self._failed_until) - _FAILED_UNTIL_MAX]:
+                self._failed_until.pop(k, None)
+
     def _pick(self, model: str | None) -> int:
         available = list(range(len(self._adapters)))
         if model:
             now = time.monotonic()
+            self._prune_failed_until(now)
             candidates = [
                 i for i in available
                 if self._failed_until.get((model, i), 0.0) <= now
@@ -81,7 +106,17 @@ class BackendPool:
         else:
             candidates = available
         warm = [i for i in candidates if model and model in self._recent[i]]
-        return min(warm or candidates, key=lambda i: (self._inflight[i], i))
+        if not warm:
+            return min(candidates, key=lambda i: (self._inflight[i], i))
+        # Prefer warm, but spill to a cold backend when the warm one is heavily
+        # loaded and an idle peer exists (review L4 — balances without thrashing).
+        best_warm = min(warm, key=lambda i: (self._inflight[i], i))
+        cold = [i for i in candidates if i not in set(warm)]
+        if cold and self._inflight[best_warm] >= self._warm_spillover:
+            best_cold = min(cold, key=lambda i: (self._inflight[i], i))
+            if self._inflight[best_cold] < self._inflight[best_warm]:
+                return best_cold
+        return best_warm
 
     @asynccontextmanager
     async def lease(self, model: str | None = None):
@@ -94,6 +129,7 @@ class BackendPool:
         except Exception:
             if model:
                 self._failed_until[(model, idx)] = time.monotonic() + 30.0
+                self._prune_failed_until(time.monotonic())
             raise
         else:
             if model:

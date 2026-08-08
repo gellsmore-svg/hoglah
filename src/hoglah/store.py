@@ -251,8 +251,14 @@ class SQLiteJobStore:
         self._closed = False
         self._init_schema()
 
+    def _require_open(self) -> None:
+        """Raise a clean ProgrammingError after close() (review L1)."""
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+
     def _init_schema(self) -> None:
         with self._lock:
+            self._require_open()
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -348,6 +354,7 @@ class SQLiteJobStore:
             idempotency_key = getattr(request, "idempotency_key", None)
 
         with self._lock:
+            self._require_open()
             # Messaging-bridge idempotency (ADR-018).
             if correlation_id is not None:
                 row = self._conn.execute(
@@ -407,6 +414,7 @@ class SQLiteJobStore:
 
     def find_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
         with self._lock:
+            self._require_open()
             row = self._conn.execute(
                 "SELECT * FROM jobs WHERE idempotency_key = ?", (idempotency_key,)
             ).fetchone()
@@ -414,10 +422,24 @@ class SQLiteJobStore:
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
+            self._require_open()
             row = self._conn.execute(
                 "SELECT * FROM jobs WHERE id = ?", (job_id,)
             ).fetchone()
         return self._row_to_dict(row)
+
+    def count(self, *, status: JobStatus | None = None) -> int:
+        """Exact row count (review M4 — no list-limit undercount)."""
+        with self._lock:
+            self._require_open()
+            if status is None:
+                row = self._conn.execute("SELECT COUNT(*) AS c FROM jobs").fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS c FROM jobs WHERE status = ?",
+                    (status.value,),
+                ).fetchone()
+        return int(row["c"] if row is not None else 0)
 
     def list(
         self,
@@ -425,7 +447,7 @@ class SQLiteJobStore:
         status: JobStatus | None = None,
         tags: list[str] | None = None,
         parent_job_id: str | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
         offset: int = 0,
         due_only: bool = False,
     ) -> list[dict[str, Any]]:
@@ -438,15 +460,17 @@ class SQLiteJobStore:
             params.append(status.value)
 
         if tags:
-            # Simple contains check via json (good enough for V1; can be improved)
+            # Exact tag membership via json_each — avoids LIKE wildcards (M6).
             for tag in tags:
-                where_clauses.append("tags_json LIKE ?")
-                params.append(f'%"{tag}"%')
+                where_clauses.append(
+                    "EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value = ?)"
+                )
+                params.append(str(tag))
 
         if parent_job_id:
-            # Crude JSON contains for parent in request_json (consistent with tags)
-            where_clauses.append("request_json LIKE ?")
-            params.append(f'%"parent_job_id": "{parent_job_id}"%')
+            # Structured JSON extract — no LIKE / separator fragility (M6).
+            where_clauses.append("json_extract(request_json, '$.parent_job_id') = ?")
+            params.append(str(parent_job_id))
 
         if due_only:
             # ISO-8601 UTC strings compare lexicographically in chronological order
@@ -457,10 +481,16 @@ class SQLiteJobStore:
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
 
-        query += " ORDER BY priority DESC, created_at ASC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
+        query += " ORDER BY priority DESC, created_at ASC"
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([int(limit), int(offset)])
+        elif offset:
+            query += " LIMIT -1 OFFSET ?"
+            params.append(int(offset))
 
         with self._lock:
+            self._require_open()
             rows = self._conn.execute(query, params).fetchall()
         return [d for r in rows if (d := self._row_to_dict(r)) is not None]
 
@@ -473,6 +503,7 @@ class SQLiteJobStore:
     ) -> None:
         now = _now_iso()
         with self._lock:
+            self._require_open()
             self._conn.execute(
                 "UPDATE jobs SET status = ?, updated_at = ?, error = COALESCE(?, error) WHERE id = ?",
                 (status.value, now, error, job_id),
@@ -489,6 +520,7 @@ class SQLiteJobStore:
         now = _now_iso()
         payload = json.dumps(asdict(result), default=str)
         with self._lock:
+            self._require_open()
             if lease_token is not None:
                 # Worker completion (G3): only if we still own the PROCESSING lease.
                 cur = self._conn.execute(
@@ -535,6 +567,7 @@ class SQLiteJobStore:
         token = _new_lease_token()
         expires = _lease_expiry_iso(lease_seconds)
         with self._lock:
+            self._require_open()
             cur = self._conn.execute(
                 """
                 UPDATE jobs
@@ -566,6 +599,7 @@ class SQLiteJobStore:
         now = _now_iso()
         expires = _lease_expiry_iso(lease_seconds)
         with self._lock:
+            self._require_open()
             cur = self._conn.execute(
                 """
                 UPDATE jobs
@@ -582,6 +616,7 @@ class SQLiteJobStore:
         now = _now_iso()
         requeued: list[str] = []
         with self._lock:
+            self._require_open()
             rows = self._conn.execute(
                 """
                 SELECT id FROM jobs
@@ -628,6 +663,7 @@ class SQLiteJobStore:
         placeholders = ",".join("?" * len(allowed_vals))
         now = _now_iso()
         with self._lock:
+            self._require_open()
             cur = self._conn.execute(
                 f"""
                 UPDATE jobs
@@ -653,8 +689,9 @@ class SQLiteJobStore:
         ``hoglah-msg-pub-*`` publishers) execute on this connection, and freeing
         it from another thread mid-``execute`` tears the statement out from under
         the sqlite3 C extension. Taking the lock makes close wait for the
-        in-flight statement; the ``_closed`` flag then turns any later call into a
-        clean ``ProgrammingError`` instead of a use-after-free.
+        in-flight statement; the ``_closed`` flag is checked by query methods
+        (``_require_open``) so late callers get a clean ``ProgrammingError``
+        rather than a use-after-free (review L1).
         """
         with self._lock:
             if self._closed:
@@ -665,6 +702,7 @@ class SQLiteJobStore:
     def get_status_counts(self) -> dict[str, int]:
         """Return dict of status -> count for quick queue overview."""
         with self._lock:
+            self._require_open()
             rows = self._conn.execute(
                 "SELECT status, COUNT(*) as c FROM jobs GROUP BY status"
             ).fetchall()
@@ -689,6 +727,7 @@ class SQLiteJobStore:
         if where:
             query += " WHERE " + " AND ".join(where)
         with self._lock:
+            self._require_open()
             cur = self._conn.execute(query, params)
             self._conn.commit()
         return cur.rowcount
@@ -696,12 +735,14 @@ class SQLiteJobStore:
     def delete_job(self, job_id: str) -> bool:
         """Delete a single job by ID. Returns True if a job was deleted."""
         with self._lock:
+            self._require_open()
             cur = self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             self._conn.commit()
         return cur.rowcount > 0
 
     def mark_result_published(self, job_id: str) -> None:
         with self._lock:
+            self._require_open()
             self._conn.execute(
                 "UPDATE jobs SET result_published = 1 WHERE id = ?", (job_id,)
             )
@@ -711,6 +752,7 @@ class SQLiteJobStore:
         terminal = (JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value)
         placeholders = ",".join("?" * len(terminal))
         with self._lock:
+            self._require_open()
             rows = self._conn.execute(
                 f"""
                 SELECT * FROM jobs

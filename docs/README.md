@@ -1,6 +1,6 @@
 # Hoglah documentation
 
-**Package:** Hoglah **0.10.3**  
+**Package:** Hoglah **0.10.4**  
 **Repo:** https://github.com/gellsmore-svg/hoglah
 
 ## Start here

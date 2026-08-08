@@ -123,13 +123,23 @@ class JobWitness:
                 job_id=job_id,
                 **metadata,
             )
+            if type in (JOB_COMPLETED, JOB_FAILED, JOB_CANCELLED):
+                with self._tracers_lock:
+                    if hasattr(self, "_live_jobs"):
+                        self._live_jobs.discard(job_id)
         except Exception:
             logger.debug("galeed emit failed (ignored)", exc_info=True)
 
     def _tracer_for(self, tracer_cls: Any, job_id: str, session_id: str) -> Any:
         """One Tracer per job (bounded LRU of 256): lifecycle events share a
-        sequence and tracer/Mongo setup isn't repeated per emit."""
+        sequence and tracer/Mongo setup isn't repeated per emit.
+
+        Live (non-terminal) jobs are never evicted so sequence numbers stay
+        contiguous for in-flight work (review L6).
+        """
         with self._tracers_lock:
+            if not hasattr(self, "_live_jobs"):
+                self._live_jobs: set[str] = set()
             tracer = self._tracers.get(job_id)
             if tracer is None:
                 tracer = tracer_cls(
@@ -139,8 +149,17 @@ class JobWitness:
                     source="hoglah",
                 )
                 self._tracers[job_id] = tracer
+                self._live_jobs.add(job_id)
                 while len(self._tracers) > 256:
-                    self._tracers.popitem(last=False)
+                    # Prefer evicting finished jobs; never drop a live one.
+                    evicted = False
+                    for old_id in list(self._tracers.keys()):
+                        if old_id not in self._live_jobs:
+                            self._tracers.pop(old_id, None)
+                            evicted = True
+                            break
+                    if not evicted:
+                        break  # all live; grow past 256 until terminals free slots
             else:
                 self._tracers.move_to_end(job_id)
             return tracer
@@ -178,6 +197,8 @@ class JobWitness:
         except ImportError:
             return
         try:
+            import inspect
+
             request_meta = dict(getattr(request, "metadata", None) or {})
             detail = {
                 "kind": getattr(request, "kind", None),
@@ -188,57 +209,80 @@ class JobWitness:
                 "num_ctx": getattr(request, "num_ctx", None),
                 "job_id": job_id,
             }
-            record_llm_call(
-                self._database(),
-                call_id=job_id,
-                trace_id=request_meta.get("trace_id") or job_id,
-                session_id=request_meta.get("session_id") or "hoglah",
-                source="hoglah",
-                step_name=request_meta.get("step_name"),
-                parent_call_id=getattr(request, "parent_job_id", None),
-                model=getattr(request, "model", None),
-                prompt=getattr(request, "prompt", None),
-                messages=getattr(request, "messages", None),
-                output=getattr(result, "output", None),
-                error=getattr(result, "error", None),
-                # Token counts are also left in `detail` for the advanced view,
-                # but pass them explicitly: galeed stores usage as a first-class
-                # field, which is what makes cost aggregatable.
-                usage=getattr(result, "usage", None) or {},
-                started_at=started_at,
-                completed_at=completed_at,
-                duration_ms=duration_ms,
-                metadata=detail,
-                emit_event=False,  # the job.* lifecycle events already mark the spine
-            )
-        except TypeError:
-            # An older galeed in this environment does not accept the newer
-            # kwargs. Retry without them so lifecycle/IO capture still works,
-            # and say so at WARNING: this silently produced cost-free records
-            # once, and a metric that reads zero is worse than one that is
-            # absent.
-            logger.warning(
-                "galeed is older than this hoglah — recording llm_call without "
-                "usage/timing. Upgrade galeed to restore cost instrumentation.",
-            )
+            kwargs: dict[str, Any] = {
+                "call_id": job_id,
+                "trace_id": request_meta.get("trace_id") or job_id,
+                "session_id": request_meta.get("session_id") or "hoglah",
+                "source": "hoglah",
+                "step_name": request_meta.get("step_name"),
+                "parent_call_id": getattr(request, "parent_job_id", None),
+                "model": getattr(request, "model", None),
+                "prompt": getattr(request, "prompt", None),
+                "messages": getattr(request, "messages", None),
+                "output": getattr(result, "output", None),
+                "error": getattr(result, "error", None),
+                "usage": getattr(result, "usage", None) or {},
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "metadata": detail,
+                "emit_event": False,  # job.* lifecycle events already mark the spine
+            }
+            # Probe signature once so a TypeError inside galeed is not mistaken
+            # for an older API surface (review L2).
             try:
-                record_llm_call(
-                    self._database(),
-                    call_id=job_id,
-                    trace_id=request_meta.get("trace_id") or job_id,
-                    session_id=request_meta.get("session_id") or "hoglah",
-                    source="hoglah",
-                    step_name=request_meta.get("step_name"),
-                    parent_call_id=getattr(request, "parent_job_id", None),
-                    model=getattr(request, "model", None),
-                    prompt=getattr(request, "prompt", None),
-                    messages=getattr(request, "messages", None),
-                    output=getattr(result, "output", None),
-                    error=getattr(result, "error", None),
-                    metadata=detail,  # usage still rides here for the old shape
-                    emit_event=False,
+                sig = inspect.signature(record_llm_call)
+                accepted = {
+                    p.name
+                    for p in sig.parameters.values()
+                    if p.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                }
+                # If **kwargs is accepted, pass everything.
+                if any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                ):
+                    filtered = kwargs
+                else:
+                    filtered = {k: v for k, v in kwargs.items() if k in accepted}
+            except (TypeError, ValueError):
+                filtered = kwargs
+            try:
+                record_llm_call(self._database(), **filtered)
+            except TypeError:
+                # Fall back to a minimal kwargs set for older galeed.
+                logger.warning(
+                    "galeed rejected llm_call kwargs — recording without "
+                    "usage/timing. Upgrade galeed to restore cost instrumentation.",
                 )
-            except Exception:
-                logger.debug("galeed llm_calls fallback failed (ignored)", exc_info=True)
+                basic = {
+                    k: kwargs[k]
+                    for k in (
+                        "call_id",
+                        "trace_id",
+                        "session_id",
+                        "source",
+                        "step_name",
+                        "parent_call_id",
+                        "model",
+                        "prompt",
+                        "messages",
+                        "output",
+                        "error",
+                        "metadata",
+                        "emit_event",
+                    )
+                    if k in kwargs
+                }
+                try:
+                    record_llm_call(self._database(), **basic)
+                except Exception:
+                    logger.debug(
+                        "galeed llm_calls fallback failed (ignored)", exc_info=True
+                    )
         except Exception:
             logger.debug("galeed llm_calls record failed (ignored)", exc_info=True)
