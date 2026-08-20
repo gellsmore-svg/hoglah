@@ -122,6 +122,29 @@ a = h.submit(prompt="step 1", model="gemma3:1b")
 b = h.submit(prompt="step 2", model="gemma3:1b", depends_on=[a], parent_job_id=a)
 ```
 
+Submit a batch of calls, including dependencies *inside* the batch (local names
+are resolved to job ids; a cycle is rejected and nothing is enqueued):
+
+```python
+batch = h.submit_batch(
+    [
+        {"name": "plan", "prompt": "outline the fix"},
+        {"name": "code", "prompt": "implement it", "depends_on": ["plan"]},
+        {"name": "review", "prompt": "review the patch", "depends_on": ["code"]},
+    ],
+    model="gemma3:1b",
+)
+h.wait_batch(batch.batch_id, timeout=120)
+h.cancel_batch(batch.batch_id)   # remaining jobs only
+```
+
+Take work off the queue:
+
+```python
+h.cancel(job_id)                 # queued or running; dependents fail
+h.remove(job_id)                 # cancel (if needed) then delete the row
+```
+
 ### CLI
 
 ```bash
@@ -138,6 +161,9 @@ hoglah models --real              # available models
 hoglah show gemma3:1b             # model details (context size, template, ...)
 hoglah clear --status completed --older-than 7 --yes
 hoglah rm <job-id> --yes
+hoglah cancel <job-id>            # --no-cascade to leave dependents queued
+hoglah submit-batch jobs.json --model gemma3:1b
+hoglah list --batch <batch-id>
 hoglah dlq                        # list failed jobs (inference dead-letter view)
 hoglah requeue <job-id>           # put a failed job back on the queue
 hoglah requeue --all-failed --yes

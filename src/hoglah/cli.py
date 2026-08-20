@@ -115,6 +115,7 @@ def version() -> None:
 def list_jobs(
     status: str | None = typer.Option(None, "--status", "-s", help="Filter by status (queued,processing,completed,...)"),
     parent: str | None = typer.Option(None, "--parent", "-p", help="Filter by parent job ID"),
+    batch: str | None = typer.Option(None, "--batch", "-b", help="Filter by batch ID"),
     limit: int = typer.Option(20, "--limit", "-l"),
     db: Path | None = typer.Option(None, "--db", help="Override database path"),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of human text"),
@@ -122,7 +123,7 @@ def list_jobs(
     """List recent jobs."""
     h = _get_hoglah(db)
     st = JobStatus(status) if status else None
-    jobs = h.list(status=st, parent_job_id=parent, limit=limit)
+    jobs = h.list(status=st, parent_job_id=parent, batch_id=batch, limit=limit)
     if not jobs:
         if json_out:
             print("[]")
@@ -164,12 +165,13 @@ def list_jobs(
 def ps_jobs(
     status: str | None = typer.Option(None, "--status", "-s", help="Filter by status (queued,processing,completed,...)"),
     parent: str | None = typer.Option(None, "--parent", "-p", help="Filter by parent job ID"),
+    batch: str | None = typer.Option(None, "--batch", "-b", help="Filter by batch ID"),
     limit: int = typer.Option(20, "--limit", "-l"),
     db: Path | None = typer.Option(None, "--db", help="Override database path"),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of human text"),
 ) -> None:
     """Alias for 'list' (convenience for queue 'ps')."""
-    list_jobs(status=status, parent=parent, limit=limit, db=db, json_out=json_out)
+    list_jobs(status=status, parent=parent, batch=batch, limit=limit, db=db, json_out=json_out)
 
 
 @app.command()
@@ -749,10 +751,18 @@ def status(
 
 
 @app.command()
-def cancel(job_id: str, db: Path | None = typer.Option(None, "--db")) -> None:
-    """Cancel a job (best-effort)."""
+def cancel(
+    job_id: str,
+    db: Path | None = typer.Option(None, "--db"),
+    cascade: bool = typer.Option(
+        True,
+        "--cascade/--no-cascade",
+        help="Fail jobs that depend on this one (default: yes)",
+    ),
+) -> None:
+    """Cancel a queued or running job (and, by default, fail its dependents)."""
     h = _get_hoglah(db)
-    if h.cancel(job_id):
+    if h.cancel(job_id, cascade=cascade):
         typer.secho(f"Cancelled {job_id}", fg=typer.colors.GREEN)
     else:
         typer.secho(f"Could not cancel {job_id} (already terminal or not found)", fg=typer.colors.YELLOW)
@@ -862,6 +872,7 @@ def submit(
         hoglah submit "later" --model x --delay 60
         hoglah submit "nightly" --model x --run-at 2026-08-08T02:00:00Z
         hoglah submit "step2" --model x --depends-on <job-id>
+        hoglah submit-batch jobs.json --model gemma3:1b
     """
     tag_list = [t.strip() for t in tags.split(",")] if tags else None
     dep_list = [d.strip() for d in depends_on.split(",") if d.strip()] if depends_on else None
@@ -970,6 +981,79 @@ def submit(
                     print("Error:", res.error)
         except TimeoutError:
             typer.secho(f"Timed out waiting for {job_id}", fg=typer.colors.RED)
+            raise typer.Exit(1)
+        finally:
+            h.close()
+
+
+@app.command("submit-batch")
+def submit_batch(
+    spec: Path = typer.Argument(
+        ...,
+        exists=True,
+        readable=True,
+        help="JSON file: {model?, jobs:[{name?, prompt, depends_on?, ...}]} or a raw job array",
+    ),
+    model: str | None = typer.Option(None, "--model", "-m", help="Default model for items that omit one"),
+    db: Path | None = typer.Option(None, "--db"),
+    real: bool = typer.Option(False, "--real", help="Use real Ollama; default is the stub"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Block until every job in the batch is terminal"),
+    timeout: float = typer.Option(180.0, "--timeout", help="Max seconds to wait when --wait is used"),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON {batch_id, jobs}"),
+) -> None:
+    """Submit a batch of jobs, optionally with named depends_on between them."""
+    try:
+        payload = json.loads(spec.read_text(encoding="utf-8"))
+    except Exception as e:
+        typer.secho(f"Invalid JSON: {e}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    items: list[dict[str, Any]]
+    default_model = model
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        raw_jobs = payload.get("jobs", payload.get("items"))
+        if not isinstance(raw_jobs, list):
+            typer.secho("JSON object must contain a 'jobs' array.", fg=typer.colors.RED)
+            raise typer.Exit(1)
+        items = raw_jobs
+        if default_model is None and isinstance(payload.get("model"), str):
+            default_model = payload["model"]
+    else:
+        typer.secho("JSON must be an object or an array of jobs.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    h = _get_hoglah(db, real=real, start_worker=wait)
+    try:
+        result = h.submit_batch(items, model=default_model)
+    except (ValueError, TypeError) as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    if json_out:
+        print(
+            json.dumps(
+                {"batch_id": result.batch_id, "jobs": result.jobs, "job_ids": list(result.job_ids)},
+                indent=2,
+            )
+        )
+    else:
+        typer.secho(f"Batch {result.batch_id}", fg=typer.colors.GREEN)
+        for name, jid in result.jobs.items():
+            print(f"  {name}: {jid}")
+
+    if wait:
+        try:
+            results = h.wait_batch(result.batch_id, timeout=timeout)
+            for res in results:
+                status = res.status.value
+                color = typer.colors.GREEN if res.status == JobStatus.COMPLETED else typer.colors.YELLOW
+                typer.secho(f"{res.job_id} {status}", fg=color)
+                if res.error:
+                    print("  ", res.error)
+        except (TimeoutError, KeyError) as e:
+            typer.secho(str(e), fg=typer.colors.RED)
             raise typer.Exit(1)
         finally:
             h.close()

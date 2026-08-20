@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
+from .batch import BatchSubmitResult, prepare_batch_items
 from .dispatch import BackendPool
 from .config import HoglahConfig, HoglahSettings
 from .metrics import REGISTRY as _METRICS
@@ -396,6 +397,8 @@ class Hoglah:
         idempotency_key: str | None = None,
         # Execution deps (G7) — wait for these job ids to COMPLETE
         depends_on: list[str] | None = None,
+        batch_id: str | None = None,
+        job_id: str | None = None,
         # Generation params
         temperature: float | None = None,
         top_p: float | None = None,
@@ -507,6 +510,7 @@ class Hoglah:
             run_at=scheduled_run_at,
             idempotency_key=idemp,
             depends_on=depends_on,
+            batch_id=batch_id,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
@@ -529,7 +533,10 @@ class Hoglah:
 
         # Enqueue (store the request)
         job_id = self._store.enqueue(
-            req, callback_key=callback_key, idempotency_key=idemp
+            req,
+            callback_key=callback_key,
+            idempotency_key=idemp,
+            job_id=job_id,
         )
         _METRICS.inc("hoglah_jobs_submitted_total")
         self._witness.emit(
@@ -597,6 +604,75 @@ class Hoglah:
             **extra,
         )
 
+    def submit_batch(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        model: str | None = None,
+        tags: list[str] | None = None,
+        batch_id: str | None = None,
+        **common: Any,
+    ) -> BatchSubmitResult:
+        """Enqueue several jobs as one batch, with optional intra-batch deps.
+
+        Each item is a mapping of :meth:`submit` kwargs. ``name`` (or ``id``)
+        is a local label for ``depends_on`` — it may name another item in this
+        batch or an already-queued job id. Items are persisted in topological
+        order. A cycle raises ``ValueError`` and nothing is enqueued.
+
+        Shared ``model`` / ``tags`` / ``common`` fill missing per-item fields.
+        """
+        bid, ordered, name_to_id, specs, resolved = prepare_batch_items(
+            items, batch_id=batch_id
+        )
+        enqueued: list[str] = []
+        try:
+            for name in ordered:
+                spec = dict(specs[name])
+                if model is not None:
+                    spec.setdefault("model", model)
+                if tags is not None:
+                    spec.setdefault("tags", tags)
+                for key, value in common.items():
+                    spec.setdefault(key, value)
+                spec["depends_on"] = resolved[name] or None
+                spec["batch_id"] = bid
+                spec["job_id"] = name_to_id[name]
+                enqueued.append(self.submit(**spec))
+        except Exception:
+            for jid in enqueued:
+                self.remove(jid, cancel=True)
+            raise
+        return BatchSubmitResult(
+            batch_id=bid,
+            jobs=dict(name_to_id),
+            job_ids=tuple(name_to_id[n] for n in ordered),
+        )
+
+    def wait_batch(
+        self,
+        batch_id: str,
+        timeout: float | None = None,
+    ) -> list[JobResult]:
+        """Block until every job in ``batch_id`` is terminal."""
+        rows = self._store.list(batch_id=batch_id, limit=None)
+        if not rows:
+            raise KeyError(f"No jobs for batch {batch_id}")
+        deadline = time.time() + timeout if timeout is not None else None
+        results: list[JobResult] = []
+        for row in rows:
+            remaining = None if deadline is None else max(0.0, deadline - time.time())
+            results.append(self.wait(row["id"], timeout=remaining))
+        return results
+
+    def cancel_batch(self, batch_id: str, *, cascade: bool = True) -> list[str]:
+        """Cancel every non-terminal job in ``batch_id``. Returns cancelled ids."""
+        cancelled: list[str] = []
+        for row in self._store.list(batch_id=batch_id, limit=None):
+            if self.cancel(row["id"], cascade=cascade):
+                cancelled.append(row["id"])
+        return cancelled
+
     def get(self, job_id: str) -> JobResult:
         """Return a JobResult for the job (works for any status).
 
@@ -650,13 +726,20 @@ class Hoglah:
         status: JobStatus | str | None = None,
         tags: list[str] | None = None,
         parent_job_id: str | None = None,
+        batch_id: str | None = None,
         limit: int = 100,
     ) -> list[JobResult]:
         """List recent jobs (lightweight view)."""
         if isinstance(status, str):
             status = JobStatus(status)
 
-        rows = self._store.list(status=status, tags=tags, parent_job_id=parent_job_id, limit=limit)
+        rows = self._store.list(
+            status=status,
+            tags=tags,
+            parent_job_id=parent_job_id,
+            batch_id=batch_id,
+            limit=limit,
+        )
         results: list[JobResult] = []
         for row in rows:
             results.append(self.get(row["id"]))
@@ -669,14 +752,23 @@ class Hoglah:
             raise KeyError(f"Job not found: {job_id}")
         return JobStatus(row["status"])
 
-    def cancel(self, job_id: str) -> bool:
+    def cancel(self, job_id: str, *, cascade: bool = True) -> bool:
         """Cancel a job — queued or in-flight (gap G4).
 
         Writes CANCELLED to the store first (clears any PROCESSING lease), then
         interrupts a local in-flight task if this process owns it. Workers on
         other machines notice via the cancel-watch / failed heartbeat and abort
         their task without overwriting the CANCELLED result.
+
+        When ``cascade`` is true (default), jobs that ``depends_on`` this one
+        are failed immediately so they do not sit queued forever.
         """
+        ok = self._cancel_one(job_id)
+        if ok and cascade:
+            self._fail_dependents(job_id)
+        return ok
+
+    def _cancel_one(self, job_id: str) -> bool:
         row = self._store.get(job_id)
         if row is None:
             return False
@@ -713,6 +805,28 @@ class Hoglah:
         # Local interrupt (same process). Remote workers rely on cancel-watch.
         self._interrupt_local_job(job_id)
         return True
+
+    def _fail_dependents(self, job_id: str) -> None:
+        """Fail queued jobs that wait on ``job_id``, then recurse."""
+        if not hasattr(self._store, "list_dependents"):
+            return
+        for child_id in list(self._store.list_dependents(job_id)):
+            row = self._store.get(child_id)
+            if row is None:
+                continue
+            try:
+                st = JobStatus(row["status"])
+            except Exception:
+                continue
+            if st not in (JobStatus.QUEUED, JobStatus.PROCESSING):
+                continue
+            if st == JobStatus.PROCESSING:
+                self._cancel_one(child_id)
+            else:
+                self._fail_blocked_dependency(
+                    child_id, f"dependency {job_id} is cancelled"
+                )
+            self._fail_dependents(child_id)
 
     def _interrupt_local_job(self, job_id: str) -> None:
         """Best-effort cancel of an in-flight asyncio task on this worker."""
@@ -1781,10 +1895,15 @@ class Hoglah:
             before = cutoff.isoformat()
         return self._store.delete_jobs(status=status, before=before) if hasattr(self._store, "delete_jobs") else 0
 
-    def remove(self, job_id: str) -> bool:
-        """Delete a job by ID. Returns True if a job was removed.
-        Works for any status (best-effort).
+    def remove(self, job_id: str, *, cancel: bool = True) -> bool:
+        """Take a job off the queue and delete its store row.
+
+        If the job is still queued or running, it is cancelled first (and
+        dependents are failed) so a worker cannot complete a deleted job.
+        Terminal jobs are deleted as-is. Returns True if a row was deleted.
         """
+        if cancel:
+            self.cancel(job_id, cascade=True)
         if hasattr(self._store, "delete_job"):
             return self._store.delete_job(job_id)
         return False

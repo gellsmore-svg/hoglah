@@ -1,0 +1,8 @@
+{
+  "model": "gemma3:1b",
+  "jobs": [
+    {"name": "plan", "prompt": "Outline a one-line fix for a retry race."},
+    {"name": "code", "prompt": "Write the patch from the outline.", "depends_on": ["plan"]},
+    {"name": "review", "prompt": "Review the patch.", "depends_on": ["code"]}
+  ]
+}

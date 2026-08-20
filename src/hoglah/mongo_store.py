@@ -185,7 +185,8 @@ class MongoJobStore:
         status: JobStatus | None = None,
         tags: list[str] | None = None,
         parent_job_id: str | None = None,
-        limit: int = 100,
+        batch_id: str | None = None,
+        limit: int | None = 100,
         offset: int = 0,
         due_only: bool = False,
     ) -> list[dict[str, Any]]:
@@ -198,6 +199,8 @@ class MongoJobStore:
             query["tags"] = {"$all": tags}
         if parent_job_id:
             query["request.parent_job_id"] = parent_job_id
+        if batch_id:
+            query["request.batch_id"] = batch_id
         if due_only:
             # Due if run_at is null/missing or already in the past (ISO strings).
             now = _now_iso()
@@ -210,8 +213,9 @@ class MongoJobStore:
             self._col.find(query)
             .sort([("priority", DESCENDING), ("created_at", ASCENDING)])
             .skip(offset)
-            .limit(limit)
         )
+        if limit is not None:
+            cursor = cursor.limit(int(limit))
         return [d for doc in cursor if (d := self._doc_to_dict(doc)) is not None]
 
     def update_status(
@@ -409,6 +413,12 @@ class MongoJobStore:
 
     def delete_job(self, job_id: str) -> bool:
         return self._col.delete_one({"_id": job_id}).deleted_count > 0
+
+    def list_dependents(self, job_id: str) -> list[str]:
+        return [
+            str(doc["_id"])
+            for doc in self._col.find({"request.depends_on": str(job_id)}, {"_id": 1})
+        ]
 
     def mark_result_published(self, job_id: str) -> None:
         self._col.update_one({"_id": job_id}, {"$set": {"result_published": True}})

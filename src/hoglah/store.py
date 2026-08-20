@@ -87,6 +87,7 @@ class JobStore(Protocol):
         status: JobStatus | None = None,
         tags: list[str] | None = None,
         parent_job_id: str | None = None,
+        batch_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
         due_only: bool = False,
@@ -97,6 +98,10 @@ class JobStore(Protocol):
         in the past (ready for a worker to claim). Used by the worker poll loop
         so delayed/scheduled jobs stay QUEUED without being claimed early.
         """
+        ...
+
+    def list_dependents(self, job_id: str) -> list[str]:
+        """Job ids whose ``depends_on`` lists ``job_id`` (any status)."""
         ...
 
     def update_status(
@@ -447,6 +452,7 @@ class SQLiteJobStore:
         status: JobStatus | None = None,
         tags: list[str] | None = None,
         parent_job_id: str | None = None,
+        batch_id: str | None = None,
         limit: int | None = 100,
         offset: int = 0,
         due_only: bool = False,
@@ -471,6 +477,10 @@ class SQLiteJobStore:
             # Structured JSON extract — no LIKE / separator fragility (M6).
             where_clauses.append("json_extract(request_json, '$.parent_job_id') = ?")
             params.append(str(parent_job_id))
+
+        if batch_id:
+            where_clauses.append("json_extract(request_json, '$.batch_id') = ?")
+            params.append(str(batch_id))
 
         if due_only:
             # ISO-8601 UTC strings compare lexicographically in chronological order
@@ -739,6 +749,23 @@ class SQLiteJobStore:
             cur = self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             self._conn.commit()
         return cur.rowcount > 0
+
+    def list_dependents(self, job_id: str) -> list[str]:
+        """Job ids whose persisted ``depends_on`` array contains ``job_id``."""
+        with self._lock:
+            self._require_open()
+            rows = self._conn.execute(
+                """
+                SELECT id FROM jobs
+                WHERE json_type(request_json, '$.depends_on') = 'array'
+                  AND EXISTS (
+                    SELECT 1 FROM json_each(json_extract(request_json, '$.depends_on'))
+                    WHERE value = ?
+                  )
+                """,
+                (str(job_id),),
+            ).fetchall()
+        return [str(r["id"]) for r in rows]
 
     def mark_result_published(self, job_id: str) -> None:
         with self._lock:

@@ -146,7 +146,11 @@ h.status(job_id)                 # JobStatus enum
 h.get(job_id)                    # JobResult (any status)
 h.wait(job_id, timeout=60)       # block until terminal or TimeoutError
 h.list(status="failed", limit=20)
-h.cancel(job_id)                 # queued or in-flight
+h.cancel(job_id)                 # queued or in-flight; dependents fail
+h.remove(job_id)                 # cancel if needed, then delete the row
+h.submit_batch([...], model="…") # named jobs + intra-batch depends_on
+h.wait_batch(batch.batch_id)
+h.cancel_batch(batch.batch_id)
 h.requeue(job_id)                # FAILED → QUEUED
 h.requeue_failed(limit=50)
 h.stats()                        # counts by status

@@ -196,7 +196,10 @@ job_id = h.submit(
 | `get(job_id)` | `JobResult` | Any status |
 | `wait(job_id, timeout=None)` | `JobResult` | Raises `TimeoutError` |
 | `list(status=, tags=, parent_job_id=, limit=)` | `list[JobResult]` | |
-| `cancel(job_id)` | `bool` | Queued **or** in-flight; cross-process safe |
+| `cancel(job_id, cascade=True)` | `bool` | Queued **or** in-flight; dependents fail by default |
+| `remove(job_id)` | `bool` | Cancel if needed, then delete the row |
+| `submit_batch(items, model=…)` | `BatchSubmitResult` | Named jobs; intra-batch `depends_on` |
+| `wait_batch` / `cancel_batch` | results / ids | Operate on a `batch_id` |
 | `requeue(job_id, allow_cancelled=False)` | `bool` | Default only `failed` |
 | `requeue_failed(limit=100, …)` | `list[str]` | Bulk |
 | `stats()` | dict | Counts |

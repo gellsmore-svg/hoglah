@@ -110,6 +110,8 @@ Update checkboxes when verifying against code.
 | Fairness / rate limits | ✅ | session/tag slots + token-bucket start rates |
 | Prometheus metrics | ✅ | `/metrics` + `hoglah metrics`; no extra dep |
 | Minimal depends_on | ✅ | wait for COMPLETED; fail if dep dead; not a DAG engine |
+| Batch submit | ✅ | `submit_batch` + local names; `wait_batch` / `cancel_batch` |
+| Queue remove | ✅ | `cancel` (cascade) then `remove` deletes the row |
 | Harder in-flight cancel | ✅ | cancel-watch + lease clear; cross-process via store |
 
 ---

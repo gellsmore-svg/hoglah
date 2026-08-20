@@ -332,6 +332,10 @@ class JobRequest:
     # missing, this job fails immediately. Distinct from parent_job_id (lineage).
     depends_on: list[str] | None = None
 
+    # Optional batch grouping (submit_batch). Same value on every job in a batch
+    # so the batch can be listed, waited on, or cancelled as a unit.
+    batch_id: str | None = None
+
     # Generation params (flattened for convenience; merged into options by worker if needed)
     temperature: float | None = None
     top_p: float | None = None

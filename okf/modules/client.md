@@ -19,7 +19,9 @@ The `Hoglah` class is the entry point. Construct it with `Hoglah(config=...)`
   (see [job kinds](../concepts/job-kinds.md)).
 - `get(job_id) -> JobResult` — current state from the [store](storage.md).
 - `wait(job_id, timeout=...) -> JobResult` — block until terminal (polling).
-- `list(...)`, `cancel(job_id)`, queue stats.
+- `list(...)`, `cancel(job_id, cascade=True)`, `remove(job_id)`, queue stats.
+- `submit_batch(items, model=...)` — named jobs, intra-batch `depends_on`,
+  `wait_batch` / `cancel_batch`.
 
 **`HoglahConfig`** carries the backend selection, `db_path`/Mongo settings,
 `output_dir`, concurrency, callback timeouts/retries, and the broker flags

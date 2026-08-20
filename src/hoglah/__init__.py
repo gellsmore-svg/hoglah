@@ -10,6 +10,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
 from .client import Hoglah, HoglahConfig
+from .batch import BatchSubmitResult
 from .models import JobResult, JobStatus, JobRequest, RetryPolicy
 from .priority_queue import SessionPriorityQueue
 
@@ -30,6 +31,7 @@ __all__ = [
     "JobStatus",
     "JobRequest",
     "RetryPolicy",
+    "BatchSubmitResult",
     "SessionPriorityQueue",
     "OllamaAdapter",
     "StubAdapter",

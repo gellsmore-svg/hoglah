@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-20
+
+### Added
+- **`submit_batch`** — enqueue several jobs as a unit with local names and
+  intra-batch ``depends_on``. ``wait_batch`` / ``cancel_batch`` / ``list(batch_id=)``.
+  CLI: ``hoglah submit-batch jobs.json``.
+- Named ``MERGE``-style execution graphs stay on ``depends_on`` (already in
+  0.10); batch submit resolves names to job ids and rejects cycles before
+  enqueue.
+
+### Changed
+- **`cancel(cascade=True)`** fails dependents immediately so they do not sit
+  queued after a cancelled prerequisite. ``hoglah cancel --no-cascade`` keeps
+  the old wait-until-claim behaviour.
+- **`remove()`** cancels (and cascades) before deleting the store row, so a
+  worker cannot complete a job that was taken off the queue.
+
 ## [0.10.5] - 2026-08-08
 
 ### Fixed
