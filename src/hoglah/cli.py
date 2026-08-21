@@ -681,6 +681,23 @@ def doctor(
     if ollama_host:
         cfg["ollama_host"] = ollama_host
 
+    print(f"Python: {sys.executable} ({sys.version.split()[0]})")
+    extras = []
+    for name, mod in (
+        ("web", "fastapi"),
+        ("mongo", "pymongo"),
+        ("kafka", "confluent_kafka"),
+        ("rabbitmq", "pika"),
+        ("redis", "redis"),
+        ("galeed", "galeed"),
+    ):
+        try:
+            __import__(mod)
+            extras.append(name)
+        except ImportError:
+            pass
+    print(f"Optional extras present: {', '.join(extras) or '(none)'}")
+
     try:
         h = Hoglah(config=cfg, use_real=use_real, start_worker=False)
         i = h.info()

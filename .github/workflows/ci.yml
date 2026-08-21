@@ -78,8 +78,34 @@ jobs:
           python -m build --sdist --wheel --outdir dist
           ls -l dist/
 
+      - name: Smoke test CLI without extras
+        run: |
+          shopt -s nullglob
+          wheels=(dist/hoglah-*-py3-none-any.whl)
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            echo "expected exactly one wheel, got ${#wheels[@]}" >&2
+            ls -l dist || true
+            exit 1
+          fi
+          python -m venv /tmp/hoglah-bare
+          /tmp/hoglah-bare/bin/pip install "${wheels[0]}"
+          /tmp/hoglah-bare/bin/hoglah --version
+          /tmp/hoglah-bare/bin/python -m hoglah --version
+
       - name: Smoke test CLI
         run: |
           hoglah --version
           hoglah --help
           hoglah ps --limit 1 || true
+
+      - name: Build Windows portable zip (wheel + win_amd64 deps)
+        run: |
+          shopt -s nullglob
+          wheels=(dist/hoglah-*-py3-none-any.whl)
+          if [[ ${#wheels[@]} -ne 1 ]]; then
+            echo "expected exactly one wheel, got ${#wheels[@]}" >&2
+            ls -l dist || true
+            exit 1
+          fi
+          bash scripts/build-windows-portable.sh "${wheels[0]}" dist-win
+          ls -l dist-win/hoglah-*-win64.zip

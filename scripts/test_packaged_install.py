@@ -11,7 +11,7 @@ and the public Python API.
 
 Usage example (stub, always works):
     python -m venv /tmp/hoglah-smoke
-    /tmp/hoglah-smoke/bin/pip install dist/hoglah-*-py3-none-any.whl[cli]
+    /tmp/hoglah-smoke/bin/pip install dist/hoglah-*-py3-none-any.whl
     /tmp/hoglah-smoke/bin/python scripts/test_packaged_install.py
 
 With your local working Ollama / llama.cpp (for full V1 real-path validation of the packaged wheel):
@@ -194,7 +194,7 @@ def main() -> None:
         print("To validate the exact same installed wheel against your working local Ollama (llama.cpp):")
         print("  1. On your machine (in the cello WSL env where Ollama works):")
         print("     python3 -m venv /tmp/hoglah-real-validate")
-        print("     /tmp/hoglah-real-validate/bin/pip install dist/hoglah-0.2.1-py3-none-any.whl[cli]")
+        print("     /tmp/hoglah-real-validate/bin/pip install dist/hoglah-*-py3-none-any.whl")
         print("     RUN_OLLAMA_TESTS=1 /tmp/hoglah-real-validate/bin/python scripts/test_packaged_install.py")
         print("  2. Or set HOGLAH_USE_REAL_ADAPTER=1 instead.")
         print("  3. The script will switch to a real model, exercise show_model/pull, auto context detection, full submit+wait, etc.")

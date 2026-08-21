@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.0] - 2026-08-20
+## [0.11.0] - 2026-08-21
 
 ### Added
 - **`submit_batch`** — enqueue several jobs as a unit with local names and
@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Named ``MERGE``-style execution graphs stay on ``depends_on`` (already in
   0.10); batch submit resolves names to job ids and rejects cycles before
   enqueue.
+- POSIX ``scripts/install.sh`` (pipx, else isolated XDG venv).
+- ``scripts/build-windows-portable.sh`` — Linux-built embeddable CPython zip
+  (``hoglah-win64/``), not a frozen exe. GitHub Releases attach the zip;
+  it is not uploaded to PyPI.
+- ``docs/install.md`` install/upgrade matrix.
+- ``python -m hoglah`` via ``__main__.py``.
+- ``hoglah doctor`` lists optional extras and the Python in use.
 
 ### Changed
 - **`cancel(cascade=True)`** fails dependents immediately so they do not sit
@@ -23,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the old wait-until-claim behaviour.
 - **`remove()`** cancels (and cascades) before deleting the store row, so a
   worker cannot complete a job that was taken off the queue.
+- ``typer`` is a core dependency so ``pip install hoglah`` yields a working
+  CLI. Extra ``cli`` is kept as a no-op alias.
+
+### Fixed
+- Release workflow keeps the win64 zip out of ``dist/`` so PyPI publish
+  does not treat it as an sdist.
+- ``install.sh`` honors ``--from`` / ``--extra`` on the existing-pipx path
+  and prints the ``~/.local/bin`` PATH hint from the caller's original PATH.
+- Windows ``hoglah.cmd`` no longer clobbers a pre-set ``HOGLAH_HOME``.
 
 ## [0.10.5] - 2026-08-08
 

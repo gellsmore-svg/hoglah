@@ -41,22 +41,36 @@ multiple workers and machines when you point it at a shared backend.
 
 ## Installation
 
-```bash
-pip install hoglah               # library
-pip install "hoglah[cli]"        # + command-line interface
-```
-
-Optional backends and transports are separate extras (all lazy-imported, so the
-base install stays dependency-light):
+**Primary (Linux, macOS, Windows with Python 3.11+):**
 
 ```bash
-pip install "hoglah[mongo]"      # MongoDB backend (pymongo)
-pip install "hoglah[kafka]"      # Kafka bridge (confluent-kafka)
-pip install "hoglah[rabbitmq]"   # RabbitMQ bridge (pika)
-pip install "hoglah[redis]"      # Redis Streams bridge (redis)
+pipx install hoglah
+hoglah doctor
 ```
 
-Published on PyPI: <https://pypi.org/project/hoglah/>. Requires Python 3.11+.
+Upgrade: `pipx upgrade hoglah`. That does **not** delete `~/.hoglah/`.
+
+**Linux without pipx:** `./scripts/install.sh` (uses pipx if present, else an
+isolated venv). **Windows without Python:** the `hoglah-<ver>-win64.zip` from
+GitHub Releases — extract `hoglah-win64\` and run `hoglah.cmd`. Full matrix,
+upgrade table, and what we will not ship (unsigned frozen `.exe`, Snap, …):
+[docs/install.md](docs/install.md).
+
+The Ollama **daemon** is optional. `pip install hoglah` (no extras) now
+installs a working CLI; `hoglah[cli]` remains a no-op alias.
+
+Optional backends stay extras (lazy-imported):
+
+```bash
+pipx inject hoglah 'hoglah[mongo]'   # MongoDB backend
+pipx inject hoglah 'hoglah[web]'     # hoglah serve
+pip install "hoglah[kafka]"          # Kafka bridge (in a venv)
+pip install "hoglah[rabbitmq]"
+pip install "hoglah[redis]"
+```
+
+Published on PyPI: <https://pypi.org/project/hoglah/>. Requires Python 3.11+
+except the Windows portable zip.
 
 ## Quick start
 
