@@ -15,8 +15,9 @@ import asyncio
 import os
 import shutil
 import signal
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from .models import JobRequest
 
@@ -248,7 +249,12 @@ class CliAdapter:
             extra=extra,
         )
 
-    async def run(self, request: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
+    async def run(
+        self,
+        request: JobRequest,
+        *,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> tuple[str, dict[str, int], dict[str, Any]]:
         binary = resolve_binary(self.spec, self.binaries)
         if not binary:
             raise FileNotFoundError(
@@ -272,15 +278,38 @@ class CliAdapter:
         proc = await asyncio.create_subprocess_exec(*argv, **kwargs)
         self._procs.add(proc)
         try:
-            out_b, err_b = await proc.communicate()
+            if on_chunk is None:
+                out_b, err_b = await proc.communicate()
+                stdout = (out_b or b"").decode("utf-8", errors="replace")
+                stderr = (err_b or b"").decode("utf-8", errors="replace")
+            else:
+                async def _drain_err() -> bytes:
+                    if proc.stderr is None:
+                        return b""
+                    return await proc.stderr.read()
+
+                err_task = asyncio.create_task(_drain_err())
+                parts: list[str] = []
+                try:
+                    assert proc.stdout is not None
+                    while True:
+                        buf = await proc.stdout.read(256)
+                        if not buf:
+                            break
+                        text = buf.decode("utf-8", errors="replace")
+                        parts.append(text)
+                        on_chunk(text)
+                except asyncio.CancelledError:
+                    err_task.cancel()
+                    raise
+                stderr = (await err_task).decode("utf-8", errors="replace")
+                await proc.wait()
+                stdout = "".join(parts)
         except asyncio.CancelledError:
             await self._kill(proc)
             raise
         finally:
             self._procs.discard(proc)
-
-        stdout = (out_b or b"").decode("utf-8", errors="replace")
-        stderr = (err_b or b"").decode("utf-8", errors="replace")
         if proc.returncode not in (0, None):
             snippet = (stderr or stdout).strip()[:800]
             raise RuntimeError(

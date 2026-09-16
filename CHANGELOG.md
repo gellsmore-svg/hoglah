@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-16
+
+### Added
+- **Token streaming** (ADR-025 / G8) — optional NDJSON chunk files plus SSE
+  on ``hoglah serve``. The JobStore still stores only the terminal
+  ``JobResult`` (no partials). Enable with ``stream_dir`` /
+  ``HOGLAH_STREAM_DIR`` / ``hoglah run --stream``.
+- ``GET /api/jobs/{id}/stream`` (``text/event-stream``) tails
+  ``<stream_dir>/<job_id>.ndjson``; if streaming was off it synthesises one
+  chunk from the stored output and closes. Job detail pages subscribe while
+  the job is queued/processing.
+- Adapters emit incremental ``on_chunk`` text: Ollama ``stream=True``,
+  OpenAI-compat SSE, CLI stdout, stub (tests). Embed jobs do not stream.
+  A retry truncates the chunk file so a UI does not concatenate attempts.
+
 ## [0.12.0] - 2026-09-11
 
 ### Added

@@ -49,4 +49,4 @@ ruff check src tests
 
 ## Version
 
-See `pyproject.toml` (`0.12.0` at time of writing).
+See `pyproject.toml` (`0.13.0` at time of writing).

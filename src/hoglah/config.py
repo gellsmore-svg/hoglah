@@ -370,6 +370,17 @@ class HoglahSettings(BaseSettings):
         description="If set, terminal job results are written to <output_dir>/<job_id>.json for polling. Dir created if needed.",
     )
 
+    # Token streaming (ADR-025 / G8). Chunk files only — JobStore stays terminal.
+    # Off by default. ``stream_enabled`` without a dir uses ~/.hoglah/streams.
+    stream_enabled: bool = Field(
+        default=False,
+        description="Write per-job NDJSON token chunks and serve them over SSE. Off by default.",
+    )
+    stream_dir: Path | None = Field(
+        default=None,
+        description="Directory for <job_id>.ndjson chunk files. Set this (or --stream) to enable.",
+    )
+
     # Outbound callback delivery (ADR-015). Applied to per-job callback_url POSTs.
     callback_timeout_seconds: float = Field(
         default=10.0,
@@ -429,7 +440,7 @@ class HoglahSettings(BaseSettings):
             return p
         return v
 
-    @field_validator("output_dir", mode="before")
+    @field_validator("output_dir", "stream_dir", mode="before")
     @classmethod
     def _expand_output_dir(cls, v: Any) -> Any:
         if isinstance(v, (str, os.PathLike)):
@@ -596,13 +607,21 @@ class HoglahSettings(BaseSettings):
             object.__setattr__(
                 self, "openai_api_key", os.environ.get("OPENAI_API_KEY")
             )
+        if self.stream_dir is not None:
+            object.__setattr__(self, "stream_enabled", True)
+        elif self.stream_enabled and self.stream_dir is None:
+            object.__setattr__(
+                self, "stream_dir", Path("~/.hoglah/streams").expanduser()
+            )
         return self
 
     def ensure_dirs(self) -> None:
-        """Create parent directory for db_path (and output_dir if set)."""
+        """Create parent directory for db_path (and output_dir / stream_dir if set)."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if self.output_dir is not None:
             self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.stream_dir is not None:
+            self.stream_dir.mkdir(parents=True, exist_ok=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a serializable view (useful for debugging / result metadata).
@@ -633,6 +652,8 @@ class HoglahSettings(BaseSettings):
             "preload_enabled": self.preload_enabled,
             "preload_lookahead": self.preload_lookahead,
             "output_dir": str(self.output_dir) if self.output_dir else None,
+            "stream_enabled": self.stream_enabled,
+            "stream_dir": str(self.stream_dir) if self.stream_dir else None,
             "log_level": self.log_level,
             "kafka_enabled": self.kafka_enabled,
             "rabbitmq_enabled": self.rabbitmq_enabled,

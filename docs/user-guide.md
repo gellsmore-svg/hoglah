@@ -1,6 +1,6 @@
 # Hoglah user guide
 
-**Version:** 0.12.0  
+**Version:** 0.13.0  
 **Audience:** developers and operators who run local (or multi-machine) LLM
 queues (Ollama, OpenAI-compatible HTTP, or coding-agent CLIs).  
 **Companion:** [AI user guide](ai-user-guide.md) for agent-oriented contracts.
@@ -409,9 +409,32 @@ Use any combination:
 4. **Output folder** — `output_dir` / `HOGLAH_OUTPUT_DIR` →
    `<dir>/<job_id>.json` atomic write
 5. **Messaging** — result published when the job came from a bridge (outbox)
+6. **Token stream** (optional, 0.13.0) — NDJSON chunks + SSE; the store still
+   only holds the terminal result
 
 `callback_allow_private_hosts` defaults to **True** (local-first). Set `False`
 when untrusted submitters can set `callback_url` via bridges.
+
+### Token streaming (G8)
+
+Default **off**. The worker never writes partial output into SQLite/Mongo.
+
+```bash
+hoglah run --real --stream
+# or: HOGLAH_STREAM_DIR=~/.hoglah/streams
+```
+
+While a generate/chat job runs, tokens append to
+`<stream_dir>/<job_id>.ndjson`. `hoglah serve` tails that file:
+
+```bash
+hoglah serve --stream-dir ~/.hoglah/streams
+curl -N http://127.0.0.1:8781/api/jobs/JOB_ID/stream
+```
+
+A retry truncates the chunk file. Embed jobs do not stream. If streaming was
+off, the SSE endpoint still works: it emits the stored output as one chunk
+once the job is terminal, then closes.
 
 ---
 
@@ -535,11 +558,14 @@ hoglah serve --host 127.0.0.1 --port 8781
 ```
 
 Read-only; maintenance (`clear` / `rm` / `requeue` / `cancel`) stays on the CLI.
+Job detail pages subscribe to `GET /api/jobs/{id}/stream` while the job is
+queued or processing.
 
 ---
 
 ## 13. Configuration cheat sheet
 
+New in 0.13.0: `STREAM_ENABLED`, `STREAM_DIR`.
 New in 0.12.0 (all `HOGLAH_` prefixed): `DEFAULT_BACKEND`, `OPENAI_BASE_URL`,
 `OPENAI_API_KEY`, `CLI_YOLO`, `CLI_BINARIES`, `AFFINITY_REORDER`,
 `PRELOAD_ENABLED`, `PRELOAD_LOOKAHEAD`, `PRELOAD_VRAM_BUDGET_BYTES`.
@@ -567,6 +593,8 @@ Every field can be set via `Hoglah(config={...})` or `HOGLAH_*` env vars.
 | `ollama_host` | `HOGLAH_OLLAMA_HOST` | client default | Single Ollama URL |
 | `ollama_hosts` | `HOGLAH_OLLAMA_HOSTS` | `[]` | Multi-host list |
 | `output_dir` | `HOGLAH_OUTPUT_DIR` | `None` | Result file drop |
+| `stream_enabled` | `HOGLAH_STREAM_ENABLED` | `false` | Token chunk files + SSE |
+| `stream_dir` | `HOGLAH_STREAM_DIR` | `None` | `<dir>/<job_id>.ndjson` |
 | `log_level` | `HOGLAH_LOG_LEVEL` | `INFO` | Logger level |
 | — | `HOGLAH_USE_REAL_ADAPTER` | unset | Force real Ollama |
 

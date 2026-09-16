@@ -16,11 +16,54 @@ import asyncio
 import hashlib
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any
 
 import ollama  # official client (declared dep)
 
 from .models import JobRequest
+
+
+async def _as_aiter(resp: Any):
+    """Ollama stream=True yields an async iterator; a single response is wrapped."""
+    if hasattr(resp, "__aiter__"):
+        async for item in resp:
+            yield item
+        return
+    yield resp
+
+
+def _ollama_chat_text(resp: Any) -> str:
+    msg = getattr(resp, "message", None)
+    if msg is None and isinstance(resp, dict):
+        msg = resp.get("message")
+    if msg is None:
+        return ""
+    if isinstance(msg, dict):
+        return str(msg.get("content") or "")
+    return str(getattr(msg, "content", "") or "")
+
+
+def _ollama_generate_text(resp: Any) -> str:
+    text = getattr(resp, "response", None)
+    if text is None and isinstance(resp, dict):
+        text = resp.get("response")
+    if text is None:
+        return ""
+    return str(text)
+
+
+def _ollama_usage(resp: Any) -> tuple[int, int, Any]:
+    def _get(name: str) -> Any:
+        val = getattr(resp, name, None)
+        if val is None and isinstance(resp, dict):
+            val = resp.get(name)
+        return val
+
+    prompt_tokens = int(_get("prompt_eval_count") or 0)
+    completion_tokens = int(_get("eval_count") or 0)
+    done_reason = _get("done_reason")
+    return prompt_tokens, completion_tokens, done_reason
 
 
 class BaseAdapter(ABC):
@@ -51,7 +94,12 @@ class BaseAdapter(ABC):
         return None
 
     @abstractmethod
-    async def run(self, request: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
+    async def run(
+        self,
+        request: JobRequest,
+        *,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> tuple[str, dict[str, int], dict[str, Any]]:
         """
         Execute the request and return:
             (output_text, usage_dict, metadata_dict)
@@ -60,6 +108,10 @@ class BaseAdapter(ABC):
             {"prompt_tokens": int, "completion_tokens": int, "total": int}
 
         metadata can carry "truncated", "truncation_reason", etc.
+
+        ``on_chunk`` (gap G8) receives incremental text when the adapter can
+        stream. The returned ``output_text`` is still the full concatenation;
+        callers must not persist partials in the JobStore.
         """
         raise NotImplementedError
 
@@ -106,7 +158,12 @@ class StubAdapter(BaseAdapter):
 
     backend_name = "stub"
 
-    async def run(self, request: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
+    async def run(
+        self,
+        request: JobRequest,
+        *,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> tuple[str, dict[str, int], dict[str, Any]]:
         # Tiny simulated "thinking" time
         await asyncio.sleep(0.03)
 
@@ -142,6 +199,12 @@ class StubAdapter(BaseAdapter):
             "completion_tokens": completion_tokens,
             "total": total,
         }
+
+        if on_chunk and output:
+            n = max(1, (len(output) + 2) // 3)
+            for i in range(0, len(output), n):
+                on_chunk(output[i : i + n])
+                await asyncio.sleep(0)
 
         return output, usage, meta
 
@@ -235,11 +298,15 @@ class OllamaAdapter(BaseAdapter):
                 opts[key] = val
         return opts or {}
 
-    async def run(self, request: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
+    async def run(
+        self,
+        request: JobRequest,
+        *,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> tuple[str, dict[str, int], dict[str, Any]]:
         client = self._get_client()
         options = self._build_options(request)
         meta: dict[str, Any] = {}
-        usage: dict[str, int] = {}
 
         # Auto-pull if the model is not present (makes real mode much more ergonomic)
         await self.pull_model(request.model)
@@ -267,7 +334,11 @@ class OllamaAdapter(BaseAdapter):
             pass  # best effort, don't fail the job
 
         try:
-            if request.messages:
+            if on_chunk is not None:
+                output, prompt_tokens, completion_tokens, done_reason = await self._run_stream(
+                    client, request, options, on_chunk
+                )
+            elif request.messages:
                 resp = await client.chat(
                     model=request.model,
                     messages=request.messages or [],
@@ -275,13 +346,8 @@ class OllamaAdapter(BaseAdapter):
                     format=request.format,
                     keep_alive=request.keep_alive,
                 )
-                msg = getattr(resp, "message", None) or (resp.get("message") if isinstance(resp, dict) else None)
-                if msg:
-                    output = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
-                else:
-                    output = str(resp)
-                prompt_tokens = int(getattr(resp, "prompt_eval_count", 0) or (resp.get("prompt_eval_count", 0) if isinstance(resp, dict) else 0))
-                completion_tokens = int(getattr(resp, "eval_count", 0) or (resp.get("eval_count", 0) if isinstance(resp, dict) else 0))
+                output = _ollama_chat_text(resp)
+                prompt_tokens, completion_tokens, done_reason = _ollama_usage(resp)
             else:
                 resp = await client.generate(
                     model=request.model,
@@ -291,23 +357,18 @@ class OllamaAdapter(BaseAdapter):
                     format=request.format,
                     keep_alive=request.keep_alive,
                 )
-                output = getattr(resp, "response", None) or (resp.get("response") if isinstance(resp, dict) else str(resp))
-                prompt_tokens = int(getattr(resp, "prompt_eval_count", 0) or (resp.get("prompt_eval_count", 0) if isinstance(resp, dict) else 0))
-                completion_tokens = int(getattr(resp, "eval_count", 0) or (resp.get("eval_count", 0) if isinstance(resp, dict) else 0))
+                output = _ollama_generate_text(resp)
+                prompt_tokens, completion_tokens, done_reason = _ollama_usage(resp)
 
-            total = prompt_tokens + completion_tokens
             usage = {
                 "prompt_tokens": prompt_tokens or 0,
                 "completion_tokens": completion_tokens or 0,
-                "total": total,
+                "total": (prompt_tokens or 0) + (completion_tokens or 0),
             }
 
             # Trust Ollama's structured done_reason. Do not substring-scan the
             # output for "context"/"truncat" — that false-positives on prompts
             # that *discuss* context windows (review F1).
-            done_reason = getattr(resp, "done_reason", None) or (
-                resp.get("done_reason") if isinstance(resp, dict) else None
-            )
             if done_reason:
                 meta["done_reason"] = done_reason
             if done_reason == "length":
@@ -320,6 +381,52 @@ class OllamaAdapter(BaseAdapter):
             # Let the caller (client._execute_with_retries) classify as transient/permanent
             # and decide on retries / final failure. We re-raise so error path is exercised.
             raise
+
+    async def _run_stream(
+        self,
+        client: Any,
+        request: JobRequest,
+        options: dict[str, Any],
+        on_chunk: Callable[[str], None],
+    ) -> tuple[str, int, int, Any]:
+        if request.messages:
+            resp = await client.chat(
+                model=request.model,
+                messages=request.messages or [],
+                options=options if options else None,
+                format=request.format,
+                keep_alive=request.keep_alive,
+                stream=True,
+            )
+            chat = True
+        else:
+            resp = await client.generate(
+                model=request.model,
+                prompt=request.prompt or "",
+                system=request.system_prompt,
+                options=options if options else None,
+                format=request.format,
+                keep_alive=request.keep_alive,
+                stream=True,
+            )
+            chat = False
+        parts: list[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        done_reason: Any = None
+        async for part in _as_aiter(resp):
+            piece = _ollama_chat_text(part) if chat else _ollama_generate_text(part)
+            if piece:
+                parts.append(piece)
+                on_chunk(piece)
+            pt, ct, dr = _ollama_usage(part)
+            if pt:
+                prompt_tokens = pt
+            if ct:
+                completion_tokens = ct
+            if dr:
+                done_reason = dr
+        return "".join(parts), prompt_tokens, completion_tokens, done_reason
 
     async def embed(self, request: JobRequest) -> tuple[list[float], dict[str, int], dict[str, Any]]:
         """Embed `request.prompt` via Ollama's `/api/embed` (client.embed).

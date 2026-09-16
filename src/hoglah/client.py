@@ -19,6 +19,7 @@ Internally:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +50,7 @@ from .preload import (
     normalize_ps_entry,
     plan_actions,
 )
+from .streaming import ChunkWriter, stream_path
 from .routing import AdapterRegistry, normalize_backend
 from .metrics import REGISTRY as _METRICS
 from .models import (
@@ -273,6 +276,9 @@ class Hoglah:
 
         # In-memory direct callbacks (only for jobs submitted in *this* process lifetime)
         self._direct_callbacks: dict[str, JobCallback] = {}
+
+        # Live NDJSON writers (G8). Keyed by job_id; cancel may finish them.
+        self._stream_writers: dict[str, ChunkWriter] = {}
 
         # Store (pluggable): explicit store= wins; else pick by config.backend.
         if store is not None:
@@ -872,6 +878,7 @@ class Hoglah:
             parent_job_id=(row.get("request") or {}).get("parent_job_id"),
         )
         self._store.set_result(job_id, result)
+        self._finish_stream(job_id, "cancelled", error=result.error, create=True)
         _METRICS.inc("hoglah_jobs_terminal_total", status="cancelled")
         self._witness.emit(
             JOB_CANCELLED,
@@ -1286,6 +1293,7 @@ class Hoglah:
                     self._store.set_result(job_id, err_result, lease_token=lease_token)
                 else:
                     self._store.set_result(job_id, err_result)
+                self._finish_stream(job_id, "failed", error=err_result.error)
                 self._witness.emit(
                     JOB_FAILED,
                     job_id=job_id,
@@ -1887,6 +1895,55 @@ class Hoglah:
         return self._try_reserve_job(
             job_id, {"request": {"model": model, "metadata": {}, "tags": []}}
         )
+    def _streaming_for(self, request: JobRequest | None) -> bool:
+        if self.config.stream_dir is None:
+            return False
+        if request is not None and getattr(request, "kind", "generate") == "embed":
+            return False
+        return True
+
+    def _open_stream(self, job_id: str) -> ChunkWriter | None:
+        stream_dir = self.config.stream_dir
+        if stream_dir is None:
+            return None
+        writer = self._stream_writers.get(job_id)
+        if writer is None:
+            try:
+                writer = ChunkWriter(stream_path(stream_dir, job_id))
+            except ValueError:
+                logger.warning("Refusing to stream unsafe job id %r", job_id)
+                return None
+            self._stream_writers[job_id] = writer
+            writer.open()
+        else:
+            writer.reset()
+        return writer
+
+    def _write_stream_chunk(self, job_id: str, text: str) -> None:
+        writer = self._stream_writers.get(job_id)
+        if writer is not None:
+            writer.write_chunk(text)
+
+    def _finish_stream(
+        self,
+        job_id: str,
+        status: str,
+        error: str | None = None,
+        *,
+        create: bool = False,
+    ) -> None:
+        writer = self._stream_writers.pop(job_id, None)
+        if writer is None:
+            if not create or self.config.stream_dir is None:
+                return
+            # Cancel before the worker opened a writer: still drop a done line
+            # so SSE does not wait on a missing file.
+            try:
+                writer = ChunkWriter(stream_path(self.config.stream_dir, job_id))
+            except ValueError:
+                return
+            writer.open()
+        writer.finish(status, error=error)
 
     async def _execute_with_retries(self, job_id: str, request: JobRequest) -> JobResult:
         """Run the Ollama call under the job's RetryPolicy (gap G2).
@@ -1899,17 +1956,28 @@ class Hoglah:
         max_retries = policy.max_retries
         _timeout = getattr(request, "timeout_seconds", None)
         is_embed = getattr(request, "kind", "generate") == "embed"
+        stream_on = self._streaming_for(request)
+        on_chunk: Callable[[str], None] | None = None
+        if stream_on:
+            self._open_stream(job_id)
+
+            def _on_chunk(text: str, jid: str = job_id) -> None:
+                self._write_stream_chunk(jid, text)
+
+            on_chunk = _on_chunk
 
         last_error = None
         timed_out = False
         for attempt in range(max_retries + 1):
             try:
+                if stream_on and attempt > 0:
+                    self._open_stream(job_id)
                 if _timeout is not None and _timeout > 0:
                     payload = await asyncio.wait_for(
-                        self._dispatch(request), timeout=_timeout
+                        self._dispatch(request, on_chunk=on_chunk), timeout=_timeout
                     )
                 else:
-                    payload = await self._dispatch(request)
+                    payload = await self._dispatch(request, on_chunk=on_chunk)
                 if is_embed:
                     vector, usage, meta = payload
                     return JobResult(
@@ -1928,6 +1996,8 @@ class Hoglah:
                     )
                 # Generation: success (even if internally truncated)
                 output, usage, meta = payload
+                if stream_on:
+                    self._finish_stream(job_id, "completed")
                 return JobResult(
                     job_id=job_id,
                     status=JobStatus.COMPLETED,
@@ -1974,6 +2044,8 @@ class Hoglah:
                 break
 
         # All retries exhausted or permanent error
+        if stream_on:
+            self._finish_stream(job_id, "failed", error=last_error)
         return JobResult(
             job_id=job_id,
             status=JobStatus.FAILED,
@@ -1986,7 +2058,23 @@ class Hoglah:
             parent_job_id=request.parent_job_id,
         )
 
-    async def _dispatch(self, req: JobRequest) -> tuple[Any, dict[str, int], dict[str, Any]]:
+    def _run_kwargs(self, adapter: Any, on_chunk: Callable[[str], None] | None) -> dict[str, Any]:
+        if on_chunk is None:
+            return {}
+        try:
+            sig = inspect.signature(adapter.run)
+        except (TypeError, ValueError):
+            return {}
+        if "on_chunk" in sig.parameters:
+            return {"on_chunk": on_chunk}
+        return {}
+
+    async def _dispatch(
+        self,
+        req: JobRequest,
+        *,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> tuple[Any, dict[str, int], dict[str, Any]]:
         """Route a request to an adapter by kind: embeddings to embed(), everything
         else to run(). With multiple backends, lease the least-loaded one for this
         job; otherwise use the single configured adapter. Both return
@@ -1997,6 +2085,7 @@ class Hoglah:
         ollama_job = backend in (None, "ollama") and getattr(
             adapter, "backend_name", ""
         ) in ("ollama", "", "base")
+        run_kw = self._run_kwargs(adapter, on_chunk)
         if (
             self._pool is not None
             and len(self._pool) > 1
@@ -2004,10 +2093,19 @@ class Hoglah:
             and getattr(adapter, "backend_name", "ollama") == "ollama"
         ):
             async with self._pool.lease(getattr(req, "model", None)) as leased:
-                return await (leased.embed(req) if is_embed else leased.run(req))
+                if is_embed:
+                    return await leased.embed(req)
+                kw = self._run_kwargs(leased, on_chunk)
+                result = await leased.run(req, **kw)
+                if on_chunk and not kw and result[0]:
+                    on_chunk(result[0])
+                return result
         if is_embed:
             return await adapter.embed(req)
-        return await adapter.run(req)
+        result = await adapter.run(req, **run_kw)
+        if on_chunk and not run_kw and result[0]:
+            on_chunk(result[0])
+        return result
 
     async def _call_ollama(self, req: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
         """

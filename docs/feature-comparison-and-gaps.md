@@ -2,7 +2,7 @@
 
 **Status:** living document  
 **Captured:** 2026-08-07  
-**Package baseline:** Hoglah **0.12.0**  
+**Package baseline:** Hoglah **0.13.0**  
 **Purpose:** Restart-friendly checklist for prioritising work against similar
 queueing / LLM-serving tools. Update this file when shipping features or
 revising scope.
@@ -14,7 +14,7 @@ revising scope.
 3. Move closed gaps to §7 “Closed”
 4. Bump “Last reviewed” and package baseline when done
 
-**Last reviewed:** 2026-09-11 (G17 CLI/HTTP backends, label groups, affinity, preload → 0.12.0)  
+**Last reviewed:** 2026-09-16 (G8 token streaming → 0.13.0)  
 **Next review trigger:** any release that changes queue semantics, scheduling,
 leases, rate limits, or multi-worker crash recovery
 
@@ -147,7 +147,7 @@ Legend: **Y** yes · **P** partial · **N** no · **N/A** wrong layer
 | File drop results | **Y** | N | N | N | N | N |
 | Full prompt/output debug capture | **Y** | N | N | N | N | P |
 | Auth / multi-tenant | **N** | N | N | N | P | Y |
-| Streaming tokens to client | **N** | N | N | N | N | Y |
+| Streaming tokens to client | **Y** (SSE + chunk files; store final) | N | N | N | N | Y |
 | Continuous batching | **N** | N/A | N/A | N/A | N/A | P |
 | Horizontal workers + shared store | Y | Y | Y | Y | Y | Y |
 | Built-in monitor UI | Y | P | N | N | Flower | Y |
@@ -183,7 +183,7 @@ When closing, move the row to §7 with date + version.
 
 | ID | Gap | Status | Why it matters | Suggested cut |
 |---|---|---|---|---|
-| G8 | Streaming results | open | Interactive UIs want tokens | SSE on serve or chunk files; keep store final |
+| — | *(none open in P1)* | — | — | — |
 
 ### P2 — Nice-to-have / explicit non-goals
 
@@ -204,6 +204,7 @@ When closing, move the row to §7 with date + version.
 | parent_job_id chaining | Lineage yes; `depends_on` for execution wait (G7) |
 | Advanced multi-tenancy / auth | Non-goal |
 | Non-Ollama backends | Present in 0.12.0 (per-job `backend=`; stub still default) |
+| Real-time streaming UI | Present in 0.13.0 (SSE + chunk files; store stays final) |
 
 ---
 
@@ -225,6 +226,7 @@ When closing, move the row to §7 with date + version.
 | G18 | Label-group sequencing | 0.12.0 | 2026-09-11 | `label` / `label_group` / `label_sequence` + `submit_sequence`. |
 | G19 | Unlabelled affinity reorder | 0.12.0 | 2026-09-11 | Stick unlabelled jobs to in-memory models; labelled jobs are barriers. |
 | G20 | Preemptive model load | 0.12.0 | 2026-09-11 | Idle-host Ollama preload of next runnable model; default off. |
+| G8 | Streaming results | 0.13.0 | 2026-09-16 | NDJSON chunk files + SSE on serve; JobStore stays terminal-only. |
 
 ---
 
@@ -232,7 +234,7 @@ When closing, move the row to §7 with date + version.
 
 If resuming without further instruction, default order:
 
-1. **G8** Optional token streaming (SSE / chunk files; store stays final)
+1. *(no P0/P1 gaps open — wait for a new brief)*
 
 Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 
@@ -254,6 +256,7 @@ Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 | In-process PQ | `priority_queue.py` |
 | CLI | `cli.py` |
 | Web monitor | `web.py` |
+| Token streaming | `streaming.py` (chunk files); SSE in `web.py` |
 | Tracing | `tracing.py` |
 | Tests | `tests/` |
 

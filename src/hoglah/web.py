@@ -28,10 +28,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 
 from .client import Hoglah
 from .models import JobResult, JobStatus
+from .streaming import encode_sse, follow_job_events, safe_job_id
 
 _STATUSES = [s.value for s in JobStatus]
 
@@ -123,6 +124,13 @@ def _age(timings: dict[str, Any] | None, now: datetime | None = None) -> str:
     return f"{secs // 86400}d"
 
 
+def _safe_get(client: Hoglah, job_id: str) -> JobResult | None:
+    try:
+        return client.get(job_id)
+    except KeyError:
+        return None
+
+
 def _result_to_dict(res: JobResult) -> dict[str, Any]:
     """JSON-safe JobResult dict (status/value, ISO timings, short preview)."""
     d = asdict(res)
@@ -190,11 +198,16 @@ def _job_row(job: dict[str, Any]) -> str:
 </tr>"""
 
 
-def create_app(db_path: Path | str | None = None) -> FastAPI:
+def create_app(
+    db_path: Path | str | None = None,
+    stream_dir: Path | str | None = None,
+) -> FastAPI:
     """Build the monitor app over the given job store (default store when None)."""
     config: dict[str, Any] = {}
     if db_path:
         config["db_path"] = Path(db_path)
+    if stream_dir:
+        config["stream_dir"] = Path(stream_dir)
     client = Hoglah(config=config, start_worker=False)
     db_label = str(client.config.db_path)
 
@@ -241,6 +254,41 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
         except KeyError:
             raise HTTPException(404, f"job not found: {job_id}")
         return {"ok": True, "job": _result_to_dict(job)}
+
+    @app.get("/api/jobs/{job_id}/stream")
+    async def api_job_stream(job_id: str) -> StreamingResponse:
+        """SSE token stream (G8). Tails the chunk file; store stays final."""
+        try:
+            jid = safe_job_id(job_id)
+        except ValueError:
+            raise HTTPException(404, f"job not found: {job_id}")
+        try:
+            client.get(jid)
+        except KeyError:
+            raise HTTPException(404, f"job not found: {jid}")
+
+        async def _gen():
+            try:
+                async for event in follow_job_events(
+                    job_id=jid,
+                    stream_dir=client.config.stream_dir,
+                    get_job=lambda i: _safe_get(client, i),
+                ):
+                    yield encode_sse(event)
+            except ValueError:
+                yield encode_sse(
+                    {"type": "done", "status": "failed", "error": "unsafe job id"}
+                )
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/metrics", response_class=PlainTextResponse)
     def prometheus_metrics() -> str:
@@ -381,6 +429,7 @@ setInterval(refresh, 4000);
         if d.get("step_name"):
             step_html = f"<tr><th>Step</th><td>{escape(d['step_name'])}</td></tr>"
 
+        live = d.get("status") in ("queued", "processing")
         output_html = ""
         if d.get("error"):
             output_html = f"<h2>Error</h2><pre>{escape(d['error'])}</pre>"
@@ -388,8 +437,44 @@ setInterval(refresh, 4000);
             output_html = f"<h2>Output</h2><pre>{escape(d['output'])}</pre>"
         elif d.get("embedding_dim"):
             output_html = '<h2>Output</h2><p class="muted">(embedding vector — not rendered)</p>'
+        elif live:
+            output_html = (
+                '<h2>Output</h2><pre id="live-out" class="muted">(streaming…)</pre>'
+            )
         else:
             output_html = '<h2>Output</h2><p class="muted">(no output yet)</p>'
+        live_script = ""
+        if live:
+            live_script = f"""
+<script>
+(function() {{
+  const pre = document.getElementById('live-out');
+  if (!pre || !window.EventSource) return;
+  let started = false;
+  const es = new EventSource('/api/jobs/{escape(d["job_id"])}/stream');
+  es.onmessage = function(ev) {{
+    let d;
+    try {{ d = JSON.parse(ev.data); }} catch (e) {{ return; }}
+    if (d.type === 'chunk' && d.text) {{
+      if (!started) {{ pre.textContent = ''; pre.classList.remove('muted'); started = true; }}
+      pre.textContent += d.text;
+    }}
+    if (d.type === 'done') {{
+      es.close();
+      if (d.status && d.status !== 'processing') {{
+        const badge = document.querySelector('.badge');
+        if (badge) {{ badge.className = 'badge ' + d.status; badge.textContent = d.status; }}
+      }}
+      if (d.error && !started) {{
+        pre.textContent = d.error;
+        pre.classList.remove('muted');
+      }}
+    }}
+  }};
+  es.onerror = function() {{ /* EventSource retries; leave the pre as-is */ }};
+}})();
+</script>
+"""
 
         # G9: failed jobs stay read-only here; requeue is a CLI maintenance action.
         requeue_hint = ""
@@ -419,6 +504,7 @@ setInterval(refresh, 4000);
 </table>
 {input_html}
 {output_html}
+{live_script}
 <p class="muted">Cross-family trace view: <code>galeed trace --call {escape(d["job_id"])}</code></p>
 """
         return _base(f"Job {d['job_id'][:8]}", body, db_label)

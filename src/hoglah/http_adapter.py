@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 from .models import JobRequest
@@ -141,13 +142,104 @@ class OpenAICompatAdapter:
                     body[key] = request.options[key]
         return body
 
-    async def run(self, request: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
+    def _post_sse(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+        timeout: float,
+        on_chunk: Callable[[str], None],
+    ) -> tuple[str, dict[str, int], dict[str, Any]]:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        parts: list[str] = []
+        usage_raw: dict[str, Any] = {}
+        finish: Any = None
+        resp_id: Any = None
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    body = line[5:].strip()
+                    if body == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(body)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(obj, dict):
+                        continue
+                    if obj.get("id"):
+                        resp_id = obj.get("id")
+                    if obj.get("usage"):
+                        usage_raw = obj.get("usage") or usage_raw
+                    choices = obj.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0] or {}
+                    if choice.get("finish_reason"):
+                        finish = choice.get("finish_reason")
+                    delta = choice.get("delta") or {}
+                    piece = delta.get("content") or ""
+                    if not piece:
+                        msg = choice.get("message") or {}
+                        piece = msg.get("content") or ""
+                    if piece:
+                        parts.append(str(piece))
+                        on_chunk(str(piece))
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")[:800]
+            except Exception:
+                pass
+            err = RuntimeError(f"HTTP {exc.code} from {url}: {body or exc.reason}")
+            setattr(err, "status_code", int(exc.code))
+            raise err from exc
+        except urllib.error.URLError as exc:
+            raise ConnectionError(f"connection error talking to {url}: {exc.reason}") from exc
+        output = "".join(parts)
+        prompt_tokens = int(usage_raw.get("prompt_tokens") or 0)
+        completion_tokens = int(usage_raw.get("completion_tokens") or 0)
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total": int(usage_raw.get("total_tokens") or (prompt_tokens + completion_tokens)),
+        }
+        meta: dict[str, Any] = {"backend": "openai", "id": resp_id, "stream": True}
+        if finish:
+            meta["done_reason"] = finish
+            if finish == "length":
+                meta["truncated"] = True
+                meta["truncation_reason"] = "length"
+        return output, usage, meta
+
+    async def run(
+        self,
+        request: JobRequest,
+        *,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> tuple[str, dict[str, int], dict[str, Any]]:
         url = f"{self._base_url(request)}/chat/completions"
         payload = {
             "model": request.model,
             "messages": self._messages(request),
             **self._sampling(request),
         }
+        if on_chunk is not None:
+            payload["stream"] = True
+            return self._post_sse(
+                url,
+                payload,
+                headers=self._headers(request),
+                timeout=self._timeout(request),
+                on_chunk=on_chunk,
+            )
         data = self._post(
             url, payload, headers=self._headers(request), timeout=self._timeout(request)
         )

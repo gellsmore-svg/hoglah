@@ -442,6 +442,9 @@ def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address (keep local; no auth)"),
     port: int = typer.Option(8781, "--port", "-p", help="Port for the web monitor"),
     db: Path | None = typer.Option(None, "--db", help="Override database path"),
+    stream_dir: Path | None = typer.Option(
+        None, "--stream-dir", help="Directory of NDJSON token streams (G8 SSE)"
+    ),
 ) -> None:
     """Serve the read-only web queue monitor (browser twin of `monitor`).
 
@@ -458,7 +461,12 @@ def serve(
         )
         raise typer.Exit(1)
     typer.echo(f"Hoglah web monitor on http://{host}:{port}")
-    uvicorn.run(create_app(db_path=db), host=host, port=port, log_level="warning")
+    uvicorn.run(
+        create_app(db_path=db, stream_dir=stream_dir),
+        host=host,
+        port=port,
+        log_level="warning",
+    )
 
 
 @app.command()
@@ -1168,6 +1176,14 @@ def run(
     preload_lookahead: int | None = typer.Option(
         None, "--preload-lookahead", help="How many runnable jobs create preload demand"
     ),
+    stream: bool = typer.Option(
+        False,
+        "--stream",
+        help="Write token chunk files and enable SSE (ADR-025 / G8). Default off.",
+    ),
+    stream_dir: Path | None = typer.Option(
+        None, "--stream-dir", help="Directory for <job_id>.ndjson token streams"
+    ),
 ) -> None:
     """Run the background worker in the foreground (blocks until interrupted).
 
@@ -1204,6 +1220,10 @@ def run(
         cfg["preload_enabled"] = True
     if preload_lookahead is not None:
         cfg["preload_lookahead"] = preload_lookahead
+    if stream:
+        cfg["stream_enabled"] = True
+    if stream_dir is not None:
+        cfg["stream_dir"] = stream_dir
 
     h = Hoglah(config=cfg, use_real=real)
     metrics_server = None

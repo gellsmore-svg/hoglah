@@ -1,6 +1,6 @@
 # Hoglah — AI / agent user guide
 
-**Version:** 0.12.0  
+**Version:** 0.13.0  
 **Audience:** coding agents, multi-agent runtimes, and tool-using models that
 enqueue LLM work through Hoglah.  
 **Human companion:** [user-guide.md](user-guide.md).
@@ -364,6 +364,8 @@ hoglah requeue --all-failed --yes
 # monitor UI
 hoglah serve --port 8781
 # scrape: GET /metrics
+# live tokens (worker must have --stream / STREAM_DIR):
+# GET /api/jobs/{id}/stream  (SSE)
 ```
 
 Bridges (at most one): `hoglah kafka-bridge` | `rabbitmq-bridge` | `redis-bridge`.
@@ -385,6 +387,8 @@ Broker request **must** include unique `correlation_id`.
 8. **At most one messaging bridge** per process.  
 9. **Worker responsibility** for interrupted PROCESSING reclaim (`start_worker=True`
    only for recovery; pure submitters must not reclaim peers).  
+10. **Store stays final** — token streaming writes `<stream_dir>/<job_id>.ndjson`
+    only; never persist partial `output` on a PROCESSING row.  
 
 ---
 

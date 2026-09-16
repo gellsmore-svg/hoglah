@@ -40,6 +40,8 @@ multiple workers and machines when you point it at a shared backend.
 - **Label groups** — `submit_sequence()` runs labelled phases in order.
 - **Model affinity + preload** — unlabelled jobs can stick to an already-loaded
   model; optional idle-host Ollama preload of the next runnable model.
+- **Token streaming** — optional NDJSON chunk files + SSE on `hoglah serve`;
+  the job store still only keeps the final result.
 - **Safe by default** — ships with a deterministic stub adapter; real backends
   are explicitly opt-in (`use_real=True` / `--real`).
 - **Rich CLI** — submit, inspect, wait, prune, diagnose, run a worker, and a live
