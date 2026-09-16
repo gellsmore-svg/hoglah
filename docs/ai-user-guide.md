@@ -1,6 +1,6 @@
 # Hoglah — AI / agent user guide
 
-**Version:** 0.10.2  
+**Version:** 0.12.0  
 **Audience:** coding agents, multi-agent runtimes, and tool-using models that
 enqueue LLM work through Hoglah.  
 **Human companion:** [user-guide.md](user-guide.md).
@@ -12,8 +12,10 @@ deterministic contracts, invariants, and failure modes over narrative.
 
 ## 0. Purpose (one line)
 
-Durable, local-first **Ollama job queue**: submit generate/chat/embed work,
+Durable, local-first **LLM job queue**: submit generate/chat/embed work,
 get `job_id` immediately, collect terminal `JobResult` asynchronously.
+Default adapter is a stub; real backends (Ollama, OpenAI-compatible HTTP,
+claude/codex/gemini/grok/kiro CLIs) are opt-in.
 
 ---
 
@@ -138,8 +140,22 @@ job_id: str = h.submit(
     delay_seconds: float | int | None = None,
     idempotency_key: str | None = None,
     depends_on: list[str] | None = None,
+    backend: str | None = None,          # ollama | openai | claude | codex | gemini | grok | kiro
+    workdir: str | None = None,          # CLI backends
+    label: str | None = None,
+    label_group: str | None = None,
+    label_sequence: list[str] | None = None,
     # sampling: temperature, top_p, top_k, seed, stop, num_predict, format, keep_alive
 ) -> str
+```
+
+```python
+h.submit_sequence(
+    [{"label": "ingest", "prompt": "...", "model": "..."},
+     {"label": "analyze", "prompt": "...", "model": "..."}],
+    sequence=["ingest", "analyze"],
+    group="etl-1",
+)
 ```
 
 ```python

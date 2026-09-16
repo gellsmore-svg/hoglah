@@ -34,8 +34,14 @@ multiple workers and machines when you point it at a shared backend.
   multi-worker / multi-machine queues.
 - **Messaging bridges** — consume job requests from / publish results to **Kafka**,
   **RabbitMQ**, or **Redis Streams**, all crash-safe.
-- **Safe by default** — ships with a deterministic stub adapter; real Ollama
-  inference is explicitly opt-in.
+- **Pluggable execution backends** — Ollama, OpenAI-compatible HTTP (vLLM,
+  llama.cpp, LM Studio, …), and headless CLIs (`claude` / `codex` / `gemini` /
+  `grok` / `kiro`). Stub remains the default; real adapters are opt-in.
+- **Label groups** — `submit_sequence()` runs labelled phases in order.
+- **Model affinity + preload** — unlabelled jobs can stick to an already-loaded
+  model; optional idle-host Ollama preload of the next runnable model.
+- **Safe by default** — ships with a deterministic stub adapter; real backends
+  are explicitly opt-in (`use_real=True` / `--real`).
 - **Rich CLI** — submit, inspect, wait, prune, diagnose, run a worker, and a live
   `monitor` (auto-refreshing status counts, throughput, and recent jobs).
 

@@ -9,8 +9,10 @@ See docs/requirements-v1.0.md and the README for the full specification.
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
+from .cli_adapters import CliAdapter, CLI_PRESETS
 from .client import Hoglah, HoglahConfig
 from .batch import BatchSubmitResult
+from .http_adapter import OpenAICompatAdapter
 from .models import JobResult, JobStatus, JobRequest, RetryPolicy
 from .priority_queue import SessionPriorityQueue
 
@@ -35,4 +37,7 @@ __all__ = [
     "SessionPriorityQueue",
     "OllamaAdapter",
     "StubAdapter",
+    "OpenAICompatAdapter",
+    "CliAdapter",
+    "CLI_PRESETS",
 ]

@@ -88,6 +88,8 @@ class JobStore(Protocol):
         tags: list[str] | None = None,
         parent_job_id: str | None = None,
         batch_id: str | None = None,
+        label: str | None = None,
+        label_group: str | None = None,
         limit: int = 100,
         offset: int = 0,
         due_only: bool = False,
@@ -453,6 +455,8 @@ class SQLiteJobStore:
         tags: list[str] | None = None,
         parent_job_id: str | None = None,
         batch_id: str | None = None,
+        label: str | None = None,
+        label_group: str | None = None,
         limit: int | None = 100,
         offset: int = 0,
         due_only: bool = False,
@@ -481,6 +485,14 @@ class SQLiteJobStore:
         if batch_id:
             where_clauses.append("json_extract(request_json, '$.batch_id') = ?")
             params.append(str(batch_id))
+
+        if label:
+            where_clauses.append("json_extract(request_json, '$.label') = ?")
+            params.append(str(label))
+
+        if label_group:
+            where_clauses.append("json_extract(request_json, '$.label_group') = ?")
+            params.append(str(label_group))
 
         if due_only:
             # ISO-8601 UTC strings compare lexicographically in chronological order

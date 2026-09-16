@@ -26,6 +26,30 @@ from .models import JobRequest
 class BaseAdapter(ABC):
     """Common interface for job executors (generate or chat style)."""
 
+    backend_name: str = "base"
+
+    def supports_preload(self) -> bool:
+        """Whether this adapter can load a model into local memory ahead of a job."""
+        return False
+
+    async def ps(self) -> list[dict[str, Any]]:
+        """Currently resident models. Default empty (unknown / not applicable)."""
+        return []
+
+    async def preload(
+        self,
+        model: str,
+        *,
+        keep_alive: str | int | None = None,
+        kind: str = "generate",
+    ) -> None:
+        """Best-effort load of ``model`` into memory. Default no-op."""
+        return None
+
+    async def unload(self, model: str) -> None:
+        """Best-effort unload (e.g. Ollama keep_alive=0). Default no-op."""
+        return None
+
     @abstractmethod
     async def run(self, request: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
         """
@@ -79,6 +103,8 @@ class StubAdapter(BaseAdapter):
     - Simulates truncation reporting when the request looks "large" relative to num_ctx.
     - Small artificial delay so the worker loop has something to do.
     """
+
+    backend_name = "stub"
 
     async def run(self, request: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
         # Tiny simulated "thinking" time
@@ -165,6 +191,8 @@ class OllamaAdapter(BaseAdapter):
       Callers always get a result (per ADR-009) unless the error is fatal.
     """
 
+    backend_name = "ollama"
+
     def __init__(self, host: str | None = None):
         self.host = host
         self._client: ollama.AsyncClient | None = None
@@ -240,7 +268,6 @@ class OllamaAdapter(BaseAdapter):
 
         try:
             if request.messages:
-                # chat path
                 resp = await client.chat(
                     model=request.model,
                     messages=request.messages or [],
@@ -248,17 +275,14 @@ class OllamaAdapter(BaseAdapter):
                     format=request.format,
                     keep_alive=request.keep_alive,
                 )
-                # resp is ChatResponse-like (has .message or dict access)
                 msg = getattr(resp, "message", None) or (resp.get("message") if isinstance(resp, dict) else None)
                 if msg:
                     output = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
                 else:
                     output = str(resp)
-                # token counts (chat responses use these fields)
                 prompt_tokens = int(getattr(resp, "prompt_eval_count", 0) or (resp.get("prompt_eval_count", 0) if isinstance(resp, dict) else 0))
                 completion_tokens = int(getattr(resp, "eval_count", 0) or (resp.get("eval_count", 0) if isinstance(resp, dict) else 0))
             else:
-                # generate path
                 resp = await client.generate(
                     model=request.model,
                     prompt=request.prompt or "",
@@ -396,3 +420,53 @@ class OllamaAdapter(BaseAdapter):
         d = self._normalize_show(resp, model)
         self._show_cache[model] = d
         return d
+
+    def supports_preload(self) -> bool:
+        return True
+
+    def _normalize_ps_entry(self, entry: Any) -> dict[str, Any]:
+        if isinstance(entry, dict):
+            name = entry.get("model") or entry.get("name")
+            return {
+                "name": name,
+                "model": name,
+                "size": entry.get("size"),
+                "size_vram": entry.get("size_vram"),
+                "expires_at": entry.get("expires_at"),
+                "details": entry.get("details"),
+            }
+        name = getattr(entry, "model", None) or getattr(entry, "name", None)
+        return {
+            "name": name,
+            "model": name,
+            "size": getattr(entry, "size", None),
+            "size_vram": getattr(entry, "size_vram", None),
+            "expires_at": getattr(entry, "expires_at", None),
+            "details": getattr(entry, "details", None),
+        }
+
+    async def ps(self) -> list[dict[str, Any]]:
+        client = self._get_client()
+        resp = await client.ps()
+        models = getattr(resp, "models", None) or (
+            resp.get("models") if isinstance(resp, dict) else []
+        )
+        return [self._normalize_ps_entry(m) for m in (models or [])]
+
+    async def preload(
+        self,
+        model: str,
+        *,
+        keep_alive: str | int | None = None,
+        kind: str = "generate",
+    ) -> None:
+        """Load ``model`` via an empty generate/embed; do not pull from disk."""
+        client = self._get_client()
+        if kind == "embed":
+            await client.embed(model=model, input=" ")
+            return
+        await client.generate(model=model, prompt="", keep_alive=keep_alive)
+
+    async def unload(self, model: str) -> None:
+        client = self._get_client()
+        await client.generate(model=model, prompt="", keep_alive=0)

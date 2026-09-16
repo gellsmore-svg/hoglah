@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-11
+
+### Added
+- **Multiple execution backends** (ADR-021) — per-job ``backend=``:
+  ``ollama``, OpenAI-compatible HTTP (``openai`` / ``vllm`` / ``llamacpp`` /
+  ``lmstudio``), and headless CLIs ``claude``, ``codex``, ``gemini``, ``grok``,
+  ``kiro``. Stub remains the default; real adapters still require
+  ``use_real=True`` / ``--real``.
+- ``OpenAICompatAdapter`` against ``{base_url}/chat/completions`` and
+  ``/embeddings`` (stdlib urllib; ``HOGLAH_OPENAI_BASE_URL`` /
+  ``HOGLAH_OPENAI_API_KEY`` or ``OPENAI_API_KEY``).
+- CLI presets with non-interactive flags; ``HOGLAH_CLI_YOLO`` / ``--cli-yolo``
+  auto-approves tools. Default is don't-hang (don't-ask / read-only sandbox).
+- **Label groups** (ADR-022) — ``label`` / ``label_group`` / ``label_sequence``
+  plus ``submit_sequence()``. Later labels wait until earlier labels COMPLETE;
+  a failed earlier label fails the rest (same shape as ``depends_on``).
+- **Unlabelled affinity reorder** (ADR-023) — unlabelled jobs may jump within
+  their segment to stick to currently loaded models, with aging so they cannot
+  starve. Labelled jobs are barriers.
+- **Preemptive Ollama load** (ADR-024) — optional ``preload_enabled`` /
+  ``hoglah run --preload``. Idle-host empty-prompt load of the next runnable
+  model; never takes a job slot; default **off**; CLI/HTTP/stub no-op.
+
+### Changed
+- Worker poll applies label-sequence gating and optional affinity reorder
+  after fairness. ``list()`` accepts ``label`` / ``label_group``.
+- Adapter protocol: ``supports_preload`` / ``ps`` / ``preload`` / ``unload``
+  (defaults no-op).
+
 ## [0.11.0] - 2026-08-21
 
 ### Added

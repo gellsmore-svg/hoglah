@@ -186,6 +186,8 @@ class MongoJobStore:
         tags: list[str] | None = None,
         parent_job_id: str | None = None,
         batch_id: str | None = None,
+        label: str | None = None,
+        label_group: str | None = None,
         limit: int | None = 100,
         offset: int = 0,
         due_only: bool = False,
@@ -201,6 +203,10 @@ class MongoJobStore:
             query["request.parent_job_id"] = parent_job_id
         if batch_id:
             query["request.batch_id"] = batch_id
+        if label:
+            query["request.label"] = label
+        if label_group:
+            query["request.label_group"] = label_group
         if due_only:
             # Due if run_at is null/missing or already in the past (ISO strings).
             now = _now_iso()

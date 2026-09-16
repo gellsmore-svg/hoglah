@@ -81,6 +81,11 @@ class BackendPool:
             d.remove(model)
         d.appendleft(model)  # maxlen evicts the oldest (rightmost)
 
+    def note_warm(self, idx: int, model: str) -> None:
+        """Record that ``idx`` just loaded ``model`` (preload success path)."""
+        if 0 <= idx < len(self._adapters) and model:
+            self._note(idx, model)
+
     def _prune_failed_until(self, now: float) -> None:
         """Drop expired cooldown entries; hard-cap map size (review L3)."""
         expired = [k for k, until in self._failed_until.items() if until <= now]

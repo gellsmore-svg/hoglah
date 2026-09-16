@@ -355,6 +355,25 @@ class JobRequest:
     # the result instead of (or alongside) polling the output folder.
     callback_url: str | None = None
 
+    # Execution backend (ADR-021). None = instance default (stub, or ollama
+    # when use_real). Known names: stub, ollama, openai, claude, codex,
+    # gemini, grok, kiro. Aliases (claude-cli, openai-compat, vllm, …) are
+    # normalised at submit / dispatch time.
+    backend: str | None = None
+
+    # Working directory for CLI backends (claude/codex/gemini/grok/kiro).
+    workdir: str | None = None
+
+    # Extra argv appended after the CLI preset (advanced / per-job).
+    cli_args: list[str] | None = None
+
+    # Label grouping + sequencing (ADR-022). Jobs that share ``label_group``
+    # wait until every earlier label in ``label_sequence`` is COMPLETED.
+    # Unlabelled jobs (no label and no label_group) skip this gate.
+    label: str | None = None
+    label_group: str | None = None
+    label_sequence: list[str] | None = None
+
 
 # Type alias for user callbacks (can be passed directly to submit or via registry)
 JobCallback = Callable[[JobResult], None]
@@ -399,6 +418,22 @@ def normalize_request(**kwargs: Any) -> JobRequest:
         else:
             deps = [str(d).strip() for d in deps if str(d).strip()]
         data["depends_on"] = deps or None
+    if "label_sequence" in data and data["label_sequence"] is not None:
+        seq = data["label_sequence"]
+        if isinstance(seq, str):
+            seq = [p.strip() for p in seq.split(",") if p.strip()]
+        else:
+            seq = [str(s).strip() for s in seq if str(s).strip()]
+        data["label_sequence"] = seq or None
+    if "cli_args" in data and data["cli_args"] is not None:
+        args = data["cli_args"]
+        if isinstance(args, str):
+            args = [p for p in args.split(" ") if p]
+        else:
+            args = [str(a) for a in args]
+        data["cli_args"] = args or None
+    if "backend" in data and data["backend"] is not None:
+        data["backend"] = str(data["backend"]).strip() or None
     return JobRequest(**data)
 
 

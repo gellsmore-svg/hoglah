@@ -873,6 +873,23 @@ def submit(
         "--depends-on",
         help="Comma-separated job ids that must COMPLETE before this job runs (G7)",
     ),
+    backend: str | None = typer.Option(
+        None,
+        "--backend",
+        help="Execution backend: ollama, openai, claude, codex, gemini, grok, kiro",
+    ),
+    workdir: str | None = typer.Option(
+        None, "--workdir", help="Working directory for CLI backends"
+    ),
+    label: str | None = typer.Option(None, "--label", help="Label for group sequencing"),
+    label_group: str | None = typer.Option(
+        None, "--label-group", help="Sequence identity shared by labelled jobs"
+    ),
+    label_sequence: str | None = typer.Option(
+        None,
+        "--label-sequence",
+        help="Comma-separated label order for this group (e.g. ingest,analyze,write)",
+    ),
     # CLI control
     db: Path | None = typer.Option(None, "--db"),
     real: bool = typer.Option(False, "--real", help="Use real Ollama (requires server); default is safe stub"),
@@ -978,6 +995,13 @@ def submit(
             retry_policy=policy_arg,
             idempotency_key=idempotency_key,
             depends_on=dep_list,
+            backend=backend,
+            workdir=workdir,
+            label=label,
+            label_group=label_group,
+            label_sequence=[s.strip() for s in label_sequence.split(",") if s.strip()]
+            if label_sequence
+            else None,
         )
     except ValueError as e:
         typer.secho(f"Error: {e}", fg=typer.colors.RED)
@@ -1126,6 +1150,24 @@ def run(
         "--metrics-host",
         help="Bind address for --metrics-port (default loopback)",
     ),
+    default_backend: str | None = typer.Option(
+        None,
+        "--default-backend",
+        help="Default job backend (ollama, openai, claude, codex, gemini, grok, kiro)",
+    ),
+    cli_yolo: bool = typer.Option(
+        False,
+        "--cli-yolo",
+        help="Auto-approve tool calls for CLI backends (claude/codex/gemini/grok/kiro)",
+    ),
+    preload: bool = typer.Option(
+        False,
+        "--preload",
+        help="Preload upcoming Ollama models on idle hosts (ADR-024)",
+    ),
+    preload_lookahead: int | None = typer.Option(
+        None, "--preload-lookahead", help="How many runnable jobs create preload demand"
+    ),
 ) -> None:
     """Run the background worker in the foreground (blocks until interrupted).
 
@@ -1154,6 +1196,14 @@ def run(
         cfg["session_rate_per_minute"] = session_rate
     if tag_rates is not None:
         cfg["tag_rates_per_minute"] = tag_rates
+    if default_backend is not None:
+        cfg["default_backend"] = default_backend
+    if cli_yolo:
+        cfg["cli_yolo"] = True
+    if preload:
+        cfg["preload_enabled"] = True
+    if preload_lookahead is not None:
+        cfg["preload_lookahead"] = preload_lookahead
 
     h = Hoglah(config=cfg, use_real=real)
     metrics_server = None

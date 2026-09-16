@@ -32,9 +32,23 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import BaseAdapter, OllamaAdapter, StubAdapter
+from .affinity import affinity_reorder, note_skips
 from .batch import BatchSubmitResult, prepare_batch_items
+from .cli_adapters import build_cli_adapters
 from .dispatch import BackendPool
 from .config import HoglahConfig, HoglahSettings
+from .http_adapter import OpenAICompatAdapter
+from .labels import eval_label_group, prepare_sequence_items
+from .preload import (
+    Demand,
+    HostView,
+    JobView,
+    PlannerConfig,
+    PlannerState,
+    normalize_ps_entry,
+    plan_actions,
+)
+from .routing import AdapterRegistry, normalize_backend
 from .metrics import REGISTRY as _METRICS
 from .models import (
     JobCallback,
@@ -282,18 +296,40 @@ class Hoglah:
         # building the real adapter), the worker fans jobs across them least-loaded.
         # Hoglah stays the single front end; callers are unchanged.
         self._pool: BackendPool | None = None
+        self._registry: AdapterRegistry | None = None
         if adapter is None:
             env_wants_real = os.environ.get("HOGLAH_USE_REAL_ADAPTER", "").lower() in ("1", "true", "yes", "on")
             if use_real or env_wants_real:
+                adapters: dict[str, Any] = {}
                 hosts = list(self.config.ollama_hosts)
                 if hosts:
                     self._pool = BackendPool([OllamaAdapter(host=h) for h in hosts])
-                    adapter = self._pool._adapters[0]  # admin ops (pull/show) use the first
+                    adapters["ollama"] = self._pool._adapters[0]
                 else:
-                    adapter = OllamaAdapter(host=self.config.ollama_host)
+                    adapters["ollama"] = OllamaAdapter(host=self.config.ollama_host)
+                adapters["openai"] = OpenAICompatAdapter(
+                    base_url=self.config.openai_base_url,
+                    api_key=self.config.openai_api_key,
+                )
+                adapters.update(
+                    build_cli_adapters(
+                        yolo=self.config.cli_yolo,
+                        binaries=self.config.cli_binaries,
+                        default_workdir=self.config.cli_workdir,
+                    )
+                )
+                default = normalize_backend(self.config.default_backend) or "ollama"
+                self._registry = AdapterRegistry(
+                    default, adapters, ollama_pool=self._pool
+                )
+                adapter = self._registry.default
             else:
                 adapter = StubAdapter()
         self.adapter: BaseAdapter = adapter
+        self._affinity_skips: dict[str, int] = {}
+        self._affinity_seen: dict[str, float] = {}
+        self._planner_state = PlannerState()
+        self._preload_task: asyncio.Task | None = None
 
         # Worker control (for background asyncio loop in daemon thread)
         self._worker_running = False
@@ -409,6 +445,12 @@ class Hoglah:
         num_predict: int | None = None,
         format: str | None = None,
         keep_alive: str | int | None = None,
+        backend: str | None = None,
+        workdir: str | None = None,
+        cli_args: list[str] | None = None,
+        label: str | None = None,
+        label_group: str | None = None,
+        label_sequence: list[str] | None = None,
         **extra: Any,  # future-proof passthrough into options or ignored
     ) -> str:
         """Submit a job. Returns the job ID immediately.
@@ -520,6 +562,12 @@ class Hoglah:
             num_predict=num_predict,
             format=format,
             keep_alive=keep_alive,
+            backend=normalize_backend(backend) or backend,
+            workdir=workdir,
+            cli_args=cli_args,
+            label=label,
+            label_group=label_group or (label if label else None),
+            label_sequence=label_sequence,
             callback_key=callback_key,
             callback_url=callback_url,
         )
@@ -603,6 +651,35 @@ class Hoglah:
             depends_on=depends_on,
             **extra,
         )
+
+    def submit_sequence(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        group: str | None = None,
+        sequence: list[str] | None = None,
+        model: str | None = None,
+        **common: Any,
+    ) -> BatchSubmitResult:
+        """Enqueue labelled jobs as an ordered group (ADR-022).
+
+        Later labels wait until earlier labels in ``sequence`` COMPLETE.
+        ``sequence`` defaults to unique labels in first-seen order.
+        """
+        gid, _seq, stamped = prepare_sequence_items(
+            items, group=group, sequence=sequence
+        )
+        jobs: dict[str, str] = {}
+        job_ids: list[str] = []
+        for item in stamped:
+            kwargs = {**common, **item}
+            if model and not kwargs.get("model"):
+                kwargs["model"] = model
+            name = str(kwargs.pop("name", kwargs.get("label") or f"job-{len(job_ids)}"))
+            jid = self.submit(**kwargs)
+            jobs[name] = jid
+            job_ids.append(jid)
+        return BatchSubmitResult(batch_id=gid, jobs=jobs, job_ids=tuple(job_ids))
 
     def submit_batch(
         self,
@@ -727,6 +804,8 @@ class Hoglah:
         tags: list[str] | None = None,
         parent_job_id: str | None = None,
         batch_id: str | None = None,
+        label: str | None = None,
+        label_group: str | None = None,
         limit: int = 100,
     ) -> list[JobResult]:
         """List recent jobs (lightweight view)."""
@@ -738,6 +817,8 @@ class Hoglah:
             tags=tags,
             parent_job_id=parent_job_id,
             batch_id=batch_id,
+            label=label,
+            label_group=label_group,
             limit=limit,
         )
         results: list[JobResult] = []
@@ -954,7 +1035,12 @@ class Hoglah:
                 # (G1). Larger batch + fair re-order when model/session/tag
                 # gates are on so a saturated key does not hide others.
                 fairness_on = self._fairness_enabled()
-                poll_limit = 50 if fairness_on else 10
+                wide = (
+                    fairness_on
+                    or self.config.affinity_reorder
+                    or self.config.preload_enabled
+                )
+                poll_limit = 50 if wide else 10
                 queued = self._store.list(
                     status=JobStatus.QUEUED, limit=poll_limit, due_only=True
                 )
@@ -968,6 +1054,17 @@ class Hoglah:
                     queued = self._fairness_order(
                         queued, processing=processing_snap
                     )
+                if self.config.affinity_reorder:
+                    queued = affinity_reorder(
+                        queued,
+                        loaded=self._loaded_model_names(),
+                        skip_counts=self._affinity_skips,
+                        first_seen=self._affinity_seen,
+                        max_skip=self.config.affinity_max_skip,
+                        max_wait_seconds=self.config.affinity_max_wait_seconds,
+                    )
+                claimed_this_poll: list[str] = []
+                seen_ids = [row["id"] for row in queued]
                 for row in queued:
                     if not self._worker_running:
                         break
@@ -989,6 +1086,16 @@ class Hoglah:
                     if dep_state == "blocked":
                         self._fail_blocked_dependency(job_id, dep_err or "dependency blocked")
                         continue
+                    lab_state, lab_err = self._eval_label_sequence(
+                        (row.get("request") or {}), job_id=job_id
+                    )
+                    if lab_state == "wait":
+                        continue
+                    if lab_state == "blocked":
+                        self._fail_blocked_dependency(
+                            job_id, lab_err or "label group blocked"
+                        )
+                        continue
                     # Reserve model/session/tag slots + rate tokens before the
                     # global semaphore (G5/G10).
                     if not self._try_reserve_job(
@@ -1002,12 +1109,31 @@ class Hoglah:
                         raise
                     task = asyncio.create_task(self._process_job(job_id, sem))
                     self._inflight[job_id] = task
+                    claimed_this_poll.append(job_id)
 
                     def _done(_t: asyncio.Task, jid: str = job_id) -> None:
                         self._inflight.pop(jid, None)
                         self._release_job_reservation(jid)
 
                     task.add_done_callback(_done)
+
+                if self.config.affinity_reorder:
+                    unlabelled_ids = [
+                        rid
+                        for rid, row in ((r["id"], r) for r in queued)
+                        if not ((row.get("request") or {}).get("label") or (row.get("request") or {}).get("label_group"))
+                    ]
+                    note_skips(
+                        self._affinity_skips,
+                        self._affinity_seen,
+                        unlabelled_ids or seen_ids,
+                        claimed_this_poll,
+                    )
+                if self.config.preload_enabled:
+                    if self._preload_task is None or self._preload_task.done():
+                        self._preload_task = asyncio.create_task(
+                            self._preload_tick(), name="hoglah-preload"
+                        )
 
                 await asyncio.sleep(poll_interval)
             except asyncio.CancelledError:
@@ -1319,6 +1445,241 @@ class Hoglah:
         self._deliver(result, request)
         logger.info("Job %s failed (dependency): %s", job_id, error)
 
+    def _eval_label_sequence(
+        self, req: dict[str, Any] | None, *, job_id: str
+    ) -> tuple[str, str | None]:
+        request = req or {}
+        group = request.get("label_group")
+        if not group:
+            return "ready", None
+        try:
+            peers = self._store.list(label_group=str(group), limit=None)
+        except TypeError:
+            peers = [
+                r
+                for r in self._store.list(limit=10_000)
+                if (r.get("request") or {}).get("label_group") == group
+            ]
+        except Exception:
+            logger.exception("Failed listing label group %s", group)
+            return "ready", None
+        return eval_label_group(request, peers, self_id=job_id)
+
+    def _loaded_model_names(self) -> set[str]:
+        names: set[str] = set()
+        if self._pool is not None:
+            for rec in self._pool.warm():
+                names.update(rec)
+        names.update(self._inflight_models.values())
+        names.update(self._planner_state.observed_vram)
+        names.update(self._planner_state.alias.values())
+        names.update(self._planner_state.alias)
+        return {n for n in names if n}
+
+    def _adapter_for(self, req: JobRequest) -> Any:
+        if self._registry is not None:
+            return self._registry.for_request(req)
+        return self.adapter
+
+    def _preload_hosts(self) -> list[Any]:
+        if self._registry is not None:
+            return [
+                a
+                for a in self._registry.ollama_members()
+                if getattr(a, "supports_preload", lambda: False)()
+            ]
+        if getattr(self.adapter, "supports_preload", lambda: False)():
+            return [self.adapter]
+        return []
+
+    def _job_view(self, row: dict[str, Any]) -> JobView:
+        req = row.get("request") or {}
+        backend = normalize_backend(req.get("backend"))
+        supports = True
+        if self._registry is not None:
+            ad = self._registry.get(backend)
+            supports = bool(
+                ad is not None
+                and getattr(ad, "supports_preload", lambda: False)()
+            )
+        elif not getattr(self.adapter, "supports_preload", lambda: False)():
+            supports = False
+        return JobView(
+            job_id=row["id"],
+            model=req.get("model") or "",
+            kind=req.get("kind") or "generate",
+            keep_alive=req.get("keep_alive"),
+            supports_preload=supports,
+        )
+
+    def _preload_demand(self) -> Demand:
+        lookahead = int(self.config.preload_lookahead)
+        fairness_on = self._fairness_enabled()
+        poll_limit = max(50 if fairness_on else 10, lookahead * 4, 50)
+        due = self._store.list(
+            status=JobStatus.QUEUED, limit=poll_limit, due_only=True
+        )
+        processing = self._processing_snapshot()
+        due = [r for r in due if r["id"] not in self._inflight]
+        ready: list[dict[str, Any]] = []
+        for row in due:
+            req = row.get("request") or {}
+            dep, _ = self._eval_depends_on(req.get("depends_on"), job_id=row["id"])
+            if dep != "ready":
+                continue
+            lab, _ = self._eval_label_sequence(req, job_id=row["id"])
+            if lab != "ready":
+                continue
+            ready.append(row)
+        if fairness_on:
+            ready = self._fairness_order(ready, processing=processing)
+        if self.config.affinity_reorder:
+            ready = affinity_reorder(
+                ready,
+                loaded=self._loaded_model_names(),
+                skip_counts=self._affinity_skips,
+                first_seen=self._affinity_seen,
+                max_skip=self.config.affinity_max_skip,
+                max_wait_seconds=self.config.affinity_max_wait_seconds,
+            )
+        remaining = max(0, int(self.config.concurrency) - len(self._inflight))
+        next_rows = ready[:remaining] if remaining else []
+        soon_rows = (
+            ready[remaining : remaining + lookahead]
+            if remaining
+            else ready[:lookahead]
+        )
+        store_models: set[str] = set()
+        for r in processing:
+            m = (r.get("request") or {}).get("model")
+            if m:
+                store_models.add(str(m))
+        try:
+            extra_q = self._store.list(
+                status=JobStatus.QUEUED, limit=500, due_only=True
+            )
+        except Exception:
+            extra_q = []
+        for r in extra_q:
+            m = (r.get("request") or {}).get("model")
+            if m:
+                store_models.add(str(m))
+        return Demand(
+            processing=tuple(self._job_view(r) for r in processing),
+            next_runnable=tuple(self._job_view(r) for r in next_rows),
+            soon=tuple(self._job_view(r) for r in soon_rows),
+            store_wide_models=frozenset(store_models),
+        )
+
+    async def _preload_tick(self) -> None:
+        adapters = self._preload_hosts()
+        if not adapters:
+            return
+        try:
+            demand = self._preload_demand()
+            host_views: list[HostView] = []
+            timeout = float(self.config.preload_rpc_timeout)
+            for i, adapter in enumerate(adapters):
+                loaded: list[Any] = []
+                ps_unknown = False
+                try:
+                    raw = await asyncio.wait_for(adapter.ps(), timeout=timeout)
+                    for entry in raw or []:
+                        rm = normalize_ps_entry(entry)
+                        if rm is None:
+                            continue
+                        loaded.append(rm)
+                        if rm.size_vram:
+                            self._planner_state.observed_vram[rm.name] = rm.size_vram
+                except Exception:
+                    ps_unknown = True
+                busy = 0
+                recent: tuple[str, ...] = ()
+                if self._pool is not None and i < len(self._pool):
+                    busy = self._pool.loads()[i]
+                    warm = self._pool.warm()
+                    if i < len(warm):
+                        recent = tuple(warm[i])
+                elif i == 0:
+                    busy = len(self._inflight)
+                host_views.append(
+                    HostView(
+                        index=i,
+                        busy_jobs=busy,
+                        loaded=tuple(loaded),
+                        recent=recent,
+                        ps_unknown=ps_unknown,
+                    )
+                )
+            cfg = PlannerConfig(
+                lookahead=self.config.preload_lookahead,
+                safety_margin=self.config.preload_safety_margin,
+                vram_budget_bytes=self.config.preload_vram_budget_bytes,
+                disk_to_vram=self.config.preload_disk_to_vram,
+                unknown_size_bytes=self.config.preload_unknown_size_bytes,
+                keep_alive=self.config.preload_keep_alive,
+                keep_alive_max=self.config.preload_keep_alive_max,
+                refresh_horizon_seconds=self.config.preload_refresh_horizon_seconds,
+                unload_unused=self.config.preload_unload_unused,
+                max_concurrent=self.config.preload_max_concurrent,
+                spillover_busy=self.config.preload_spillover_busy,
+                idle_only=self.config.preload_idle_only,
+            )
+            actions = plan_actions(
+                demand,
+                host_views,
+                state=self._planner_state,
+                cfg=cfg,
+                now=time.monotonic(),
+            )
+            from .models import classify_error
+
+            for act in actions:
+                host = host_views[act.host_index]
+                if host.busy_jobs > 0:
+                    continue
+                adapter = adapters[act.host_index]
+                _METRICS.inc("hoglah_preload_attempts_total")
+                try:
+                    if act.op == "unload":
+                        await asyncio.wait_for(
+                            adapter.unload(act.model), timeout=timeout
+                        )
+                    else:
+                        await asyncio.wait_for(
+                            adapter.preload(
+                                act.model,
+                                keep_alive=act.keep_alive,
+                                kind=act.kind,
+                            ),
+                            timeout=timeout,
+                        )
+                    if act.op == "preload" and self._pool is not None:
+                        self._pool.note_warm(act.host_index, act.model)
+                    _METRICS.inc("hoglah_preload_success_total")
+                except Exception as exc:
+                    classes = classify_error(exc)
+                    delay = 60.0 if "oom" in classes else 30.0
+                    self._planner_state.cooldown_until[
+                        (act.model, act.host_index)
+                    ] = time.monotonic() + delay
+                    if "oom" in classes:
+                        self._planner_state.hard_cap[act.host_index] = sum(
+                            m.size_vram for m in host.loaded
+                        )
+                        _METRICS.inc("hoglah_preload_oom_total")
+                    logger.warning(
+                        "preload %s %s on host %s failed: %s",
+                        act.op,
+                        act.model,
+                        act.host_index,
+                        exc,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("preload tick failed")
+
     def _fairness_enabled(self) -> bool:
         c = self.config
         return bool(
@@ -1526,6 +1887,7 @@ class Hoglah:
         return self._try_reserve_job(
             job_id, {"request": {"model": model, "metadata": {}, "tags": []}}
         )
+
     async def _execute_with_retries(self, job_id: str, request: JobRequest) -> JobResult:
         """Run the Ollama call under the job's RetryPolicy (gap G2).
 
@@ -1630,12 +1992,22 @@ class Hoglah:
         job; otherwise use the single configured adapter. Both return
         (payload, usage, metadata)."""
         is_embed = getattr(req, "kind", "generate") == "embed"
-        if self._pool is not None and len(self._pool) > 1:
-            async with self._pool.lease(getattr(req, "model", None)) as adapter:
-                return await (adapter.embed(req) if is_embed else adapter.run(req))
+        adapter = self._adapter_for(req)
+        backend = normalize_backend(getattr(req, "backend", None))
+        ollama_job = backend in (None, "ollama") and getattr(
+            adapter, "backend_name", ""
+        ) in ("ollama", "", "base")
+        if (
+            self._pool is not None
+            and len(self._pool) > 1
+            and (backend in (None, "ollama") or ollama_job)
+            and getattr(adapter, "backend_name", "ollama") == "ollama"
+        ):
+            async with self._pool.lease(getattr(req, "model", None)) as leased:
+                return await (leased.embed(req) if is_embed else leased.run(req))
         if is_embed:
-            return await self.adapter.embed(req)
-        return await self._call_ollama(req)
+            return await adapter.embed(req)
+        return await adapter.run(req)
 
     async def _call_ollama(self, req: JobRequest) -> tuple[str, dict[str, int], dict[str, Any]]:
         """
@@ -1918,6 +2290,9 @@ class Hoglah:
             "version": __version__,
             "config": self.config.to_dict(),
             "adapter": type(self.adapter).__name__,
+            "backends": (
+                self._registry.backends() if self._registry is not None else [type(self.adapter).__name__]
+            ),
             "stats": self.stats(),
         }
 

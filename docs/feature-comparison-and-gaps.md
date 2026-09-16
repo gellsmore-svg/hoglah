@@ -2,7 +2,7 @@
 
 **Status:** living document  
 **Captured:** 2026-08-07  
-**Package baseline:** Hoglah **0.10.2**  
+**Package baseline:** Hoglah **0.12.0**  
 **Purpose:** Restart-friendly checklist for prioritising work against similar
 queueing / LLM-serving tools. Update this file when shipping features or
 revising scope.
@@ -14,7 +14,7 @@ revising scope.
 3. Move closed gaps to §7 “Closed”
 4. Bump “Last reviewed” and package baseline when done
 
-**Last reviewed:** 2026-08-07 (G1–G3, G6, G9, G10 closed → 0.10.0)  
+**Last reviewed:** 2026-09-11 (G17 CLI/HTTP backends, label groups, affinity, preload → 0.12.0)  
 **Next review trigger:** any release that changes queue semantics, scheduling,
 leases, rate limits, or multi-worker crash recovery
 
@@ -113,6 +113,10 @@ Update checkboxes when verifying against code.
 | Batch submit | ✅ | `submit_batch` + local names; `wait_batch` / `cancel_batch` |
 | Queue remove | ✅ | `cancel` (cascade) then `remove` deletes the row |
 | Harder in-flight cancel | ✅ | cancel-watch + lease clear; cross-process via store |
+| OpenAI-compat + CLI backends | ✅ | `backend=`; stub default; real opt-in |
+| Label-group sequencing | ✅ | `label` / `label_group` / `label_sequence` |
+| Unlabelled model affinity | ✅ | reorder within segments; aging |
+| Preemptive Ollama load | ✅ | `preload_enabled`; idle hosts; default off |
 
 ---
 
@@ -190,7 +194,6 @@ When closing, move the row to §7 with date + version.
 | G14 | Auth / multi-tenancy | deferred | Local-only; required if expose serve beyond localhost |
 | G15 | Full workflow engine | wontfix | Deborah/Tirzah own process graphs |
 | G16 | vLLM continuous batching | wontfix | Inference server concern |
-| G17 | Non-Ollama backends | deferred | Listed non-goal V1; revisit if family needs OpenAI-compatible workers |
 
 ### Spec vs code notes (requirements-v1.0)
 
@@ -200,7 +203,7 @@ When closing, move the row to §7 with date + version.
 | max_retries / timeout / priority | Present |
 | parent_job_id chaining | Lineage yes; `depends_on` for execution wait (G7) |
 | Advanced multi-tenancy / auth | Non-goal |
-| Non-Ollama backends | Deferred |
+| Non-Ollama backends | Present in 0.12.0 (per-job `backend=`; stub still default) |
 
 ---
 
@@ -218,6 +221,10 @@ When closing, move the row to §7 with date + version.
 | G11 | Prometheus metrics | 0.10.1 | 2026-08-07 | text exposition; gauges + counters + latency summary; CLI + /metrics. |
 | G7 | Minimal depends_on | 0.10.2 | 2026-08-07 | `depends_on` list; wait COMPLETED; fail if dep FAILED/CANCELLED/missing. |
 | G4 | Harder in-flight cancel | 0.10.2 | 2026-08-07 | cancel-watch 250ms; cross-process store cancel; lease clear on cancel. |
+| G17 | Non-Ollama backends | 0.12.0 | 2026-09-11 | OpenAI-compat HTTP + claude/codex/gemini/grok/kiro CLIs; stub still default. |
+| G18 | Label-group sequencing | 0.12.0 | 2026-09-11 | `label` / `label_group` / `label_sequence` + `submit_sequence`. |
+| G19 | Unlabelled affinity reorder | 0.12.0 | 2026-09-11 | Stick unlabelled jobs to in-memory models; labelled jobs are barriers. |
+| G20 | Preemptive model load | 0.12.0 | 2026-09-11 | Idle-host Ollama preload of next runnable model; default off. |
 
 ---
 
@@ -225,9 +232,7 @@ When closing, move the row to §7 with date + version.
 
 If resuming without further instruction, default order:
 
-1. **G8** Optional token streaming (SSE / chunk files; store stays final)  
-
-Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah (see also below).
+1. **G8** Optional token streaming (SSE / chunk files; store stays final)
 
 Avoid: Celery Canvas, Beat clone, or vLLM-inside-Hoglah.
 

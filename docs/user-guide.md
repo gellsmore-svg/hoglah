@@ -1,15 +1,17 @@
 # Hoglah user guide
 
-**Version:** 0.10.2  
+**Version:** 0.12.0  
 **Audience:** developers and operators who run local (or multi-machine) LLM
-queues on Ollama.  
+queues (Ollama, OpenAI-compatible HTTP, or coding-agent CLIs).  
 **Companion:** [AI user guide](ai-user-guide.md) for agent-oriented contracts.
 
 ---
 
 ## 1. What Hoglah is
 
-Hoglah is a **durable job queue specialised for Ollama** (generate, chat, embed).
+Hoglah is a **durable job queue specialised for LLM work** (generate, chat, embed).
+Ollama is the local default; OpenAI-compatible HTTP and headless CLIs
+(claude / codex / gemini / grok / kiro) are opt-in backends.
 
 You submit work and get a **job ID immediately**. A background worker claims jobs
 from a durable store (SQLite by default, MongoDB for multi-worker), runs them
@@ -66,7 +68,7 @@ pip install -e ".[cli,dev]"
               Worker (concurrency + slots + fairness)
                     │
                     ▼
-              Adapter (Stub | Ollama, multi-host pool)
+              Adapter (Stub | Ollama | OpenAI-compat | CLI)
                     │
                     ▼
          Result: poll | callback | HTTP | file | broker
@@ -310,6 +312,50 @@ hoglah run --session-slots 1 --tag-slots 'a=1' --session-rate 30 --tag-rates 'a=
 When fairness gates are on, the worker prefers **less-loaded sessions** among due
 jobs.
 
+### Execution backends (Ollama, OpenAI-compat, CLIs)
+
+Real execution is still opt-in (`use_real=True` / `hoglah run --real`). Per-job
+`backend=` then selects:
+
+| `backend` | Runs |
+|---|---|
+| `ollama` (default when real) | Official Ollama client |
+| `openai` (aliases: `vllm`, `llamacpp`, `lmstudio`, `groq`) | `{base_url}/chat/completions` |
+| `claude` / `codex` / `gemini` / `grok` / `kiro` | Headless CLI (`claude -p`, `codex exec`, `gemini -p`, `grok -p`, `kiro-cli chat --no-interactive`) |
+
+```python
+h.submit(prompt="…", model="gpt-4o", backend="openai")
+h.submit(prompt="…", model="sonnet", backend="claude", workdir="/repo")
+```
+
+CLI backends default to *don't hang* (don't-ask / read-only sandbox). Pass
+`--cli-yolo` / `HOGLAH_CLI_YOLO=1` to auto-approve tools.
+
+### Label groups
+
+Jobs that share `label_group` wait in `label_sequence` order. Later labels run
+only after existing earlier labels COMPLETE; a failed earlier label fails the
+rest.
+
+```python
+h.submit_sequence(
+    [
+        {"label": "ingest", "prompt": "extract", "model": "gemma3:1b"},
+        {"label": "analyze", "prompt": "summarise", "model": "gemma3:1b"},
+    ],
+    sequence=["ingest", "analyze"],
+    group="etl-1",
+)
+```
+
+### Unlabelled affinity + preload
+
+Unlabelled jobs may be reordered (within labelled barriers) so a model already
+in memory keeps running. Aging stops starvation.
+
+Ollama preload is **off** by default: `hoglah run --real --preload` loads the
+next runnable model on **idle** hosts only. It never takes a job slot.
+
 ### Multi-host Ollama
 
 ```python
@@ -494,6 +540,10 @@ Read-only; maintenance (`clear` / `rm` / `requeue` / `cancel`) stays on the CLI.
 
 ## 13. Configuration cheat sheet
 
+New in 0.12.0 (all `HOGLAH_` prefixed): `DEFAULT_BACKEND`, `OPENAI_BASE_URL`,
+`OPENAI_API_KEY`, `CLI_YOLO`, `CLI_BINARIES`, `AFFINITY_REORDER`,
+`PRELOAD_ENABLED`, `PRELOAD_LOOKAHEAD`, `PRELOAD_VRAM_BUDGET_BYTES`.
+
 Every field can be set via `Hoglah(config={...})` or `HOGLAH_*` env vars.
 
 | Setting | Env | Default | Purpose |
@@ -501,6 +551,11 @@ Every field can be set via `Hoglah(config={...})` or `HOGLAH_*` env vars.
 | `db_path` | `HOGLAH_DB_PATH` | `~/.hoglah/hoglah.db` | SQLite path |
 | `backend` | `HOGLAH_BACKEND` | `sqlite` | `sqlite` \| `mongo` |
 | `concurrency` | `HOGLAH_CONCURRENCY` | `1` | Global parallel jobs |
+| `default_backend` | `HOGLAH_DEFAULT_BACKEND` | `auto` | ollama when real; else stub |
+| `openai_base_url` | `HOGLAH_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compat API |
+| `cli_yolo` | `HOGLAH_CLI_YOLO` | `false` | Auto-approve CLI tools |
+| `affinity_reorder` | `HOGLAH_AFFINITY_REORDER` | `true` | Stick unlabelled jobs to warm models |
+| `preload_enabled` | `HOGLAH_PRELOAD_ENABLED` | `false` | Idle-host Ollama preload |
 | `lease_seconds` | `HOGLAH_LEASE_SECONDS` | `30` | PROCESSING lease TTL |
 | `heartbeat_interval_seconds` | `HOGLAH_HEARTBEAT_INTERVAL_SECONDS` | `10` | Lease heartbeat |
 | `model_slots` | `HOGLAH_MODEL_SLOTS` | `{}` | `name=n,name=n` |

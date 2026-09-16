@@ -4,8 +4,9 @@ Short orientation for coding agents editing or calling this repository.
 
 ## What this package is
 
-**Hoglah** = durable **Ollama job queue** (generate / chat / embed).  
-Default adapter is a **safe stub**; real Ollama is opt-in (`use_real=True` / `--real`).
+**Hoglah** = durable **LLM job queue** (generate / chat / embed).  
+Default adapter is a **safe stub**; real backends (Ollama, OpenAI-compatible HTTP,
+claude/codex/gemini/grok/kiro CLIs) are opt-in (`use_real=True` / `--real`).
 
 ## Docs to read
 
@@ -48,4 +49,4 @@ ruff check src tests
 
 ## Version
 
-See `pyproject.toml` (`0.10.2` at time of writing).
+See `pyproject.toml` (`0.12.0` at time of writing).

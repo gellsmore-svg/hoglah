@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -234,6 +234,133 @@ class HoglahSettings(BaseSettings):
         description="Multiple Ollama server URLs to fan jobs across (least-loaded). Comma-separated via env. Empty falls back to ollama_host.",
     )
 
+    # Execution backends (ADR-021). "auto" = stub unless use_real, then ollama.
+    default_backend: str = Field(
+        default="auto",
+        description="Default job backend when submit() omits backend= "
+        "(auto / ollama / openai / claude / codex / gemini / grok / kiro).",
+    )
+    openai_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        description="OpenAI-compatible API base URL (vLLM, llama.cpp server, LM Studio, Groq, …).",
+    )
+    openai_api_key: str | None = Field(
+        default=None,
+        description="Bearer token for the OpenAI-compatible adapter. Also reads OPENAI_API_KEY.",
+    )
+    cli_yolo: bool = Field(
+        default=False,
+        description="Auto-approve CLI tool calls (claude/codex/gemini/grok/kiro). "
+        "Default is don't-hang / don't-ask rather than full auto-approve.",
+    )
+    cli_binaries: dict[str, str] = Field(
+        default_factory=dict,
+        description="Override CLI binary paths, e.g. claude=/opt/claude. "
+        "Env: HOGLAH_CLI_BINARIES=claude=/path,grok=/path.",
+    )
+    cli_workdir: str | None = Field(
+        default=None,
+        description="Default working directory for CLI backends.",
+    )
+
+    # Unlabelled model-affinity reorder (ADR-023). Labelled jobs stay anchors.
+    affinity_reorder: bool = Field(
+        default=True,
+        description="Reorder unlabelled queued jobs to stick to in-memory models.",
+    )
+    affinity_max_skip: int = Field(
+        default=20,
+        ge=1,
+        description="Polls an unlabelled job may be skipped for a warm-model peer.",
+    )
+    affinity_max_wait_seconds: float = Field(
+        default=60.0,
+        ge=0.0,
+        description="Max seconds an unlabelled job may wait behind affinity reorder.",
+    )
+
+    # Preemptive model load (ADR-024). Off by default; no-op on stub/CLI/HTTP.
+    preload_enabled: bool = Field(
+        default=False,
+        description="Preload upcoming Ollama models on idle hosts. Off by default.",
+    )
+    preload_idle_only: bool = Field(
+        default=True,
+        description="Only preload on hosts with zero in-flight jobs (v1 always idle-only).",
+    )
+    preload_lookahead: int = Field(
+        default=8,
+        ge=1,
+        description="How many effective-runnable jobs create preload demand.",
+    )
+    preload_safety_margin: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=0.9,
+        description="Fraction of VRAM budget reserved (not packed).",
+    )
+    preload_vram_budget_bytes: int | None = Field(
+        default=None,
+        ge=1,
+        description="Explicit VRAM cap in bytes. None = unknown-total (≤1 speculative load).",
+    )
+    preload_disk_to_vram: float = Field(
+        default=1.0,
+        gt=0.0,
+        description="Multiply list()/show() disk size to estimate VRAM.",
+    )
+    preload_unknown_size_bytes: int | None = Field(
+        default=None,
+        ge=1,
+        description="Fallback size when a model has never been observed. None = skip non-next.",
+    )
+    preload_keep_alive: str = Field(
+        default="5m",
+        description="keep_alive for empty-prompt preload when ≥2 remaining jobs.",
+    )
+    preload_keep_alive_max: str = Field(
+        default="30m",
+        description="Cap for planner-chosen keep_alive. Cannot be 0 or -1.",
+    )
+    preload_refresh_horizon_seconds: float = Field(
+        default=60.0,
+        ge=0.0,
+        description="Refresh a resident keep-set model if it expires within this many seconds.",
+    )
+    preload_unload_unused: bool = Field(
+        default=False,
+        description="Send keep_alive=0 for resident models with no store-wide demand.",
+    )
+    preload_max_concurrent: int = Field(
+        default=1,
+        ge=1,
+        description="Max in-flight preload RPCs per worker process.",
+    )
+    preload_spillover_busy: int = Field(
+        default=1,
+        ge=1,
+        description="Warm host busy-count required before preloading M_next onto a cold idle host.",
+    )
+    preload_ps_ttl: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Seconds to cache adapter.ps() inside a worker.",
+    )
+    preload_size_ttl: float = Field(
+        default=300.0,
+        ge=0.0,
+        description="Seconds to cache list()/show() disk sizes.",
+    )
+    preload_rpc_timeout: float = Field(
+        default=60.0,
+        gt=0.0,
+        description="Timeout for empty-prompt preload RPCs.",
+    )
+    preload_pull: bool = Field(
+        default=False,
+        description="If true, preload may pull missing models from disk. Default false.",
+    )
+
     # Result delivery — output folder (ADR-014). When set, the worker writes
     # each terminal job's full result to `<output_dir>/<job_id>.json` so a
     # decoupled submitter (e.g. a separate process feeding the shared queue)
@@ -418,6 +545,59 @@ class HoglahSettings(BaseSettings):
     def _parse_tag_rates(cls, v: Any) -> Any:
         return cls._parse_named_float_map(v, field="tag_rates_per_minute")
 
+    @field_validator("cli_binaries", mode="before")
+    @classmethod
+    def _parse_cli_binaries(cls, v: Any) -> Any:
+        if v is None or v == "":
+            return {}
+        if isinstance(v, dict):
+            return {str(k): str(val) for k, val in v.items() if str(k).strip()}
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return {}
+            if s.startswith("{"):
+                import json
+
+                parsed = json.loads(s)
+                if not isinstance(parsed, dict):
+                    raise ValueError("cli_binaries JSON must be an object")
+                return {str(k): str(val) for k, val in parsed.items()}
+            out: dict[str, str] = {}
+            for part in s.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "=" not in part:
+                    raise ValueError(
+                        f"cli_binaries entry {part!r} must be name=/path"
+                    )
+                name, _, path = part.partition("=")
+                name = name.strip()
+                if not name:
+                    raise ValueError("cli_binaries entry has empty name")
+                out[name] = path.strip()
+            return out
+        return v
+
+    @field_validator("preload_keep_alive_max")
+    @classmethod
+    def _finite_keep_alive_max(cls, v: str) -> str:
+        from .preload import parse_keep_alive
+
+        secs = parse_keep_alive(v)
+        if secs is None or secs <= 0:
+            return "30m"
+        return v
+
+    @model_validator(mode="after")
+    def _openai_key_fallback(self) -> "HoglahSettings":
+        if not self.openai_api_key:
+            object.__setattr__(
+                self, "openai_api_key", os.environ.get("OPENAI_API_KEY")
+            )
+        return self
+
     def ensure_dirs(self) -> None:
         """Create parent directory for db_path (and output_dir if set)."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -446,6 +626,12 @@ class HoglahSettings(BaseSettings):
             "tag_rates_per_minute": dict(self.tag_rates_per_minute),
             "ollama_host": self.ollama_host,
             "ollama_hosts": list(self.ollama_hosts),
+            "default_backend": self.default_backend,
+            "openai_base_url": self.openai_base_url,
+            "cli_yolo": self.cli_yolo,
+            "affinity_reorder": self.affinity_reorder,
+            "preload_enabled": self.preload_enabled,
+            "preload_lookahead": self.preload_lookahead,
             "output_dir": str(self.output_dir) if self.output_dir else None,
             "log_level": self.log_level,
             "kafka_enabled": self.kafka_enabled,
