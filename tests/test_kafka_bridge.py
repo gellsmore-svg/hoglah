@@ -310,6 +310,28 @@ def test_parse_rejects_type_invalid_fields_h4():
         parse_input_message(json.dumps({**base, "retry_policy": "not-a-dict"}).encode())
 
 
+def test_broker_message_cannot_set_cli_or_base_url():
+    parsed = parse_input_message(
+        json.dumps(
+            {
+                "correlation_id": "c",
+                "model": "m",
+                "prompt": "hi",
+                "cli_args": ["--dangerously-bypass-approvals-and-sandbox"],
+                "workdir": "/tmp/elsewhere",
+                "options": {"base_url": "http://169.254.169.254/v1", "temperature": 0.2},
+                "metadata": {"base_url": "http://10.0.0.1/v1", "source": "bridge"},
+            }
+        ).encode()
+    )
+    assert parsed.request.cli_args is None
+    assert parsed.request.workdir is None
+    assert "base_url" not in (parsed.request.options or {})
+    assert parsed.request.options["temperature"] == 0.2
+    assert "base_url" not in parsed.request.metadata
+    assert parsed.request.metadata["source"] == "bridge"
+
+
 def test_parse_reserves_idempotency_key_h3():
     """Broker body must not set client G6 idempotency_key (hijack vector)."""
     parsed = parse_input_message(

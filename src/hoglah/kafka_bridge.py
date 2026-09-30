@@ -145,14 +145,26 @@ def parse_input_message(
     user_meta = data.get("metadata") or {}
     if not isinstance(user_meta, dict):
         raise InvalidMessageError("'metadata' must be an object")
-    options = data.get("options") or {}
+    raw_options = data.get("options") or {}
+    if not isinstance(raw_options, dict):
+        raise InvalidMessageError("'options' must be an object")
+    # A broker job cannot choose the OpenAI endpoint. The adapter also ignores
+    # base_url; dropping it here keeps it out of the stored request.
+    options = {k: v for k, v in raw_options.items() if k != "base_url"}
+    user_meta = {k: v for k, v in user_meta.items() if k != "base_url"}
 
     # Accept known JobRequest fields from the top level or from `options`.
+    # data is merged second so a top-level field wins, then the dangerous
+    # ones are removed. options on the request is the filtered object, not
+    # the raw message (data["options"] still contains base_url).
     extra: dict[str, Any] = {
         k: v for k, v in {**options, **data}.items() if k in _REQ_FIELDS and k not in _RESERVED
     }
-    if options and "options" in _REQ_FIELDS:
-        extra.setdefault("options", options)
+    # cli_args and workdir stay available on local submit(). Broker messages
+    # cannot set the worker argv or starting directory.
+    extra.pop("cli_args", None)
+    extra.pop("workdir", None)
+    extra["options"] = options or None
 
     # H4: type-validate bridge-supplied fields before JobRequest (dataclass
     # accepts anything; poison must dead-letter, not reach the worker).

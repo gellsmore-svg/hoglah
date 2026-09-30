@@ -5,6 +5,50 @@ from __future__ import annotations
 from hoglah.client import _callback_url_allowed, _ScreeningRedirectHandler
 
 
+def test_callback_blocks_shared_multicast_and_nat64(monkeypatch) -> None:
+    from hoglah.client import _PinnedCallbackHTTP, _callback_url_allowed
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(2, 1, 6, "", ("100.64.1.1", port or 80))]
+
+    monkeypatch.setattr("hoglah.client.socket.getaddrinfo", fake_getaddrinfo)
+    ok, reason = _callback_url_allowed("http://shared.example/hook", allow_private=False)
+    assert ok is False
+    assert "non-public" in reason
+
+    monkeypatch.setattr(
+        "hoglah.client.socket.getaddrinfo",
+        lambda *a, **k: [(2, 1, 6, "", ("224.0.0.1", 80))],
+    )
+    ok, _ = _callback_url_allowed("http://multicast.example/hook", allow_private=False)
+    assert ok is False
+
+    monkeypatch.setattr(
+        "hoglah.client.socket.getaddrinfo",
+        lambda *a, **k: [(10, 1, 6, "", ("64:ff9b::7f00:1", 80))],
+    )
+    ok, _ = _callback_url_allowed("http://nat64.example/hook", allow_private=False)
+    assert ok is False
+
+    monkeypatch.setattr(
+        "hoglah.client.socket.getaddrinfo",
+        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 80))],
+    )
+    seen = {}
+
+    def fake_create(address, timeout, source_address):
+        seen["address"] = address
+        raise OSError("stop")
+
+    conn = _PinnedCallbackHTTP("example.test", 80, timeout=1)
+    monkeypatch.setattr(conn, "_create_connection", fake_create)
+    try:
+        conn.connect()
+    except OSError as exc:
+        assert "stop" in str(exc)
+    assert seen["address"] == ("93.184.216.34", 80)
+
+
 def test_callback_blocks_link_local_and_unspecified() -> None:
     ok, reason = _callback_url_allowed("http://169.254.169.254/meta", allow_private=False)
     assert ok is False

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The HTTP adapter always calls its configured endpoint, so the process bearer stays on that host.
+- Broker messages leave `cli_args` and `workdir` unset and drop `base_url` from options and metadata. Local `submit` still accepts `workdir` and `cli_args`.
+- With private callback hosts disallowed, callback delivery refuses non-public addresses, including shared address space, and connects to the address it checked.
+
 ## [0.13.0] - 2026-09-16
 
 ### Added

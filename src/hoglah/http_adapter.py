@@ -59,10 +59,11 @@ class OpenAICompatAdapter:
         return headers
 
     def _base_url(self, request: JobRequest) -> str:
-        if request.options and request.options.get("base_url"):
-            return str(request.options["base_url"]).rstrip("/")
-        if request.metadata and request.metadata.get("base_url"):
-            return str(request.metadata["base_url"]).rstrip("/")
+        """The adapter's configured endpoint.
+
+        Job ``options`` and ``metadata`` cannot replace it. The process bearer
+        is sent only to this URL.
+        """
         return self.base_url
 
     def _timeout(self, request: JobRequest) -> float:

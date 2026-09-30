@@ -19,10 +19,12 @@ Internally:
 from __future__ import annotations
 
 import asyncio
+import http.client
 import inspect
 import json
 import logging
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -126,12 +128,60 @@ def _redact_url(url: str) -> str:
         return "<unparseable-url>"
 
 
-def _callback_url_allowed(url: str, *, allow_private: bool) -> tuple[bool, str]:
-    """SSRF guard for outbound callback POSTs: http(s) only, and private/
-    loopback/link-local/unspecified/multicast targets are refused unless
-    explicitly allowed. Re-checked on every redirect hop (review M9)."""
+def _ip_is_public(address: str) -> bool:
+    """True only for a globally routable address.
+
+    Unwraps IPv4-mapped IPv6 and NAT64 so an embedded non-public IPv4 address
+    is judged as that address. Shared address space (100.64.0.0/10) is not
+    public: on Python 3.12 it is neither ``is_private`` nor ``is_global``.
+    """
     import ipaddress
-    import socket
+
+    ip = ipaddress.ip_address(address.split("%", 1)[0])
+    if isinstance(ip, ipaddress.IPv6Address):
+        mapped = ip.ipv4_mapped
+        if mapped is not None:
+            ip = mapped
+        elif ip in ipaddress.ip_network("64:ff9b::/96"):
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return not (
+        ip.is_multicast
+        or ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_unspecified
+        or not ip.is_global
+    )
+
+
+def _pinned_public_ip(host: str, port: int) -> str:
+    """Return one public address for *host*. Every answer must be public."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise OSError("callback host does not resolve") from exc
+    chosen: str | None = None
+    for info in infos:
+        address = info[4][0]
+        try:
+            public = _ip_is_public(address)
+        except ValueError:
+            public = False
+        if not public:
+            raise OSError("callback host resolves to a non-public address")
+        if chosen is None:
+            chosen = address
+    if chosen is None:
+        raise OSError("callback host does not resolve")
+    return chosen
+
+
+def _callback_url_allowed(url: str, *, allow_private: bool) -> tuple[bool, str]:
+    """SSRF guard for outbound callback POSTs: http(s) only, and non-public
+    targets are refused unless explicitly allowed. Re-checked on every
+    redirect hop (review M9). The later connection uses the same classifier
+    and connects to an address that passed it."""
     from urllib.parse import urlsplit
 
     try:
@@ -145,24 +195,20 @@ def _callback_url_allowed(url: str, *, allow_private: bool) -> tuple[bool, str]:
         return False, "no host"
     if allow_private:
         return True, "private targets allowed by config"
+    port = parts.port or (443 if parts.scheme == "https" else 80)
     try:
-        infos = socket.getaddrinfo(host, None)
-        addresses = {info[4][0] for info in infos}
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError:
         return False, "host does not resolve"
-    for address in addresses:
+    if not infos:
+        return False, "host does not resolve"
+    for info in infos:
+        address = info[4][0]
         try:
-            ip = ipaddress.ip_address(address)
+            public = _ip_is_public(address)
         except ValueError:
-            continue
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_unspecified
-            or ip.is_multicast
-        ):
+            public = False
+        if not public:
             return False, f"resolves to non-public address {address}"
     return True, "ok"
 
@@ -183,6 +229,34 @@ class _ScreeningRedirectHandler(urllib.request.HTTPRedirectHandler):
                 f"callback redirect blocked ({reason}): {_redact_url(newurl)}"
             )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class _PinnedCallbackHTTP(http.client.HTTPConnection):
+    def connect(self):
+        ip = _pinned_public_ip(self.host, self.port)
+        self.sock = self._create_connection((ip, self.port), self.timeout, self.source_address)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+
+class _PinnedCallbackHTTPS(http.client.HTTPSConnection):
+    def connect(self):
+        ip = _pinned_public_ip(self.host, self.port)
+        self.sock = self._create_connection((ip, self.port), self.timeout, self.source_address)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if self._tunnel_host:
+            self._tunnel()
+        server_hostname = self.host if self._context.check_hostname else None
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+
+
+class _PinnedCallbackHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PinnedCallbackHTTP, req)
+
+
+class _PinnedCallbackHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedCallbackHTTPS, req, context=self._context)
 
 
 def _run_async(coro_factory):
@@ -2195,12 +2269,20 @@ class Hoglah:
         timeout = self.config.callback_timeout_seconds
         data = payload.encode("utf-8")
         last_err: str | None = None
-        # Custom opener re-screens every redirect hop (M9).
-        opener = urllib.request.build_opener(
-            _ScreeningRedirectHandler(
-                allow_private=self.config.callback_allow_private_hosts
-            )
-        )
+        # Custom opener re-screens every redirect hop (M9). When private
+        # hosts are refused, the connection uses the address that passed
+        # the check rather than a second lookup of the hostname.
+        allow_private = self.config.callback_allow_private_hosts
+        handlers: list[Any] = [
+            _ScreeningRedirectHandler(allow_private=allow_private)
+        ]
+        if not allow_private:
+            handlers = [
+                _PinnedCallbackHTTPHandler(),
+                _PinnedCallbackHTTPSHandler(),
+                *handlers,
+            ]
+        opener = urllib.request.build_opener(*handlers)
         for attempt in range(attempts):
             try:
                 req = urllib.request.Request(

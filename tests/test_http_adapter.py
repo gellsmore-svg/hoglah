@@ -47,6 +47,27 @@ def test_chat_completions_and_usage():
     assert meta["backend"] == "openai"
 
 
+def test_job_base_url_is_ignored():
+    adapter = OpenAICompatAdapter(base_url="http://localhost:8000/v1", api_key="sk-worker")
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["authorization"] = req.headers.get("Authorization")
+        return _Resp({"choices": [{"message": {"content": "ok"}}], "usage": {}})
+
+    request = JobRequest(
+        prompt="ping",
+        model="gpt-4o",
+        options={"base_url": "http://169.254.169.254/v1"},
+        metadata={"base_url": "http://10.0.0.1/v1"},
+    )
+    with patch("hoglah.http_adapter.urllib.request.urlopen", fake_urlopen):
+        asyncio.run(adapter.run(request))
+    assert seen["url"].startswith("http://localhost:8000/v1/")
+    assert seen["authorization"] == "Bearer sk-worker"
+
+
 def test_embeddings():
     adapter = OpenAICompatAdapter(base_url="http://localhost:8000/v1")
     payload = {"data": [{"embedding": [0.1, 0.2, 0.3]}], "usage": {"prompt_tokens": 2}}
