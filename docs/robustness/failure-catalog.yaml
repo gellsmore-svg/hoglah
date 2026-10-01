@@ -1,0 +1,3076 @@
+# Generated from the analysis data; edit the source data, not this file.
+schema: hoglah-failure-catalog/1
+analysed_version: hoglah 0.13.0 (f0d322a)
+date: '2026-10-01'
+risk_axes:
+  P: probability/frequency
+  I: impact
+  S: silent-failure risk
+  C: state-corruption risk
+  D: duplicate-side-effect risk
+  R: difficulty of recovery
+  O: observability deficiency
+  X: cross-component propagation
+risk_scale: 0-5
+risk_aggregate_formula: 0.5P + I + 1.5S + 1.5C + D + 0.5R + 0.5O + 0.5X (vector is authoritative)
+failure_modes:
+- id: FM-CORE-001
+  component: worker poll
+  provider: '-'
+  operation: select claimable jobs
+  trigger: more than poll_limit (50; 10 without affinity) higher-priority QUEUED rows waiting on depends_on/label
+    order
+  basis: observed (E01)
+  preconditions: '-'
+  mechanism: poll lists the top-N due QUEUED rows by priority; waiting rows occupy the window, the dependency they
+    wait on sits beyond it
+  current_behaviour: all jobs stay QUEUED forever
+  persistent_state_after: QUEUED rows, unchanged
+  externally_visible: jobs never finish; no error
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: dependency_failure (scheduler)
+  retryable: n/a
+  ambiguity: none
+  current_logging: nothing
+  required_logging: job_stuck event + gauge (QUEUED-and-due beyond threshold)
+  current_recovery: none
+  proposed_recovery: per-poll readiness cache; page until claimable rows found or max_scan; waiting rows never consume
+    the window
+  risk:
+    P: 2
+    I: 5
+    S: 5
+    C: 1
+    D: 0
+    R: 2
+    O: 5
+    X: 3
+  test: e04_hol.py N=60 -> assert parent completes
+  evidence: experiments/e04_hol.py
+  requirements:
+  - ROB-SCHED-001
+  risk_aggregate: 20.0
+- id: FM-CORE-002
+  component: cancel
+  provider: '-'
+  operation: cancel() vs worker commit
+  trigger: cancel() reads PROCESSING, worker commits COMPLETED, cancel writes
+  basis: observed (E02)
+  preconditions: '-'
+  mechanism: '_cancel_one: get -> unconditional update_status(CANCELLED) -> unconditional set_result(CANCELLED)'
+  current_behaviour: COMPLETED result overwritten with CANCELLED; output destroyed
+  persistent_state_after: CANCELLED, result_json without output
+  externally_visible: caller callback says completed, store/output file say cancelled
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'yes'
+  stuck_job: 'no'
+  failure_category: cancelled
+  retryable: n/a
+  ambiguity: none (completion was definite)
+  current_logging: INFO cancel only
+  required_logging: job.cancelled with prior status; conflict counter
+  current_recovery: none
+  proposed_recovery: single conditional write status IN (QUEUED,PROCESSING); return False if lost
+  risk:
+    P: 1
+    I: 4
+    S: 4
+    C: 5
+    D: 0
+    R: 4
+    O: 4
+    X: 2
+  test: e05_cancel_race.py -> assert COMPLETED preserved, cancel() False
+  evidence: experiments/e05_cancel_race.py; client.py:932-969
+  requirements:
+  - ROB-CORE-002
+  - ROB-STATE-003
+  risk_aggregate: 23.0
+- id: FM-CORE-003
+  component: lease heartbeat
+  provider: '-'
+  operation: renew lease
+  trigger: one transient store exception in heartbeat (e.g. SQLite 'database is locked' > busy_timeout, Mongo blip)
+  basis: observed (E03)
+  preconditions: '-'
+  mechanism: _heartbeat_loop catches only CancelledError; the task dies; finally swallows its exception; lease lapses;
+    reclaim requeues
+  current_behaviour: job executes twice; first result discarded (token mismatch)
+  persistent_state_after: COMPLETED from second run, no trace of first
+  externally_visible: nothing visible
+  duplicate_execution: 'yes'
+  lost_result: possible
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: store_unavailable
+  retryable: yes (heartbeat itself)
+  ambiguity: first run's outcome discarded
+  current_logging: nothing at WARNING
+  required_logging: lease.renew_failed, lease.lost, attempt outcome
+  current_recovery: reclaim + rerun
+  proposed_recovery: retry renewal within remaining lease; abort provider work if renewal impossible; record lease_lost
+  risk:
+    P: 3
+    I: 4
+    S: 5
+    C: 2
+    D: 5
+    R: 2
+    O: 5
+    X: 3
+  test: e06_hb.py -> assert exactly one execution
+  evidence: experiments/e06_hb.py; client.py:1393-1415
+  requirements:
+  - ROB-LEASE-001
+  risk_aggregate: 26.0
+- id: FM-CORE-004
+  component: worker completion
+  provider: '-'
+  operation: post-commit bookkeeping
+  trigger: any exception after successful set_result (store.get, thread start, metrics)
+  basis: observed (E04)
+  preconditions: '-'
+  mechanism: generic except writes token-fenced FAILED (no-op, token cleared) but still _deliver(FAILED) and skips
+    the callback
+  current_behaviour: output file/HTTP/broker receive FAILED for a COMPLETED job; named callback never fires
+  persistent_state_after: COMPLETED in store
+  externally_visible: 'contradictory: sinks say failed, store says completed'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'yes'
+  stuck_job: 'no'
+  failure_category: logging_failure / storage_failure (post-commit)
+  retryable: n/a
+  ambiguity: none
+  current_logging: ERROR traceback only
+  required_logging: delivery.failed event with sink
+  current_recovery: none
+  proposed_recovery: 'commit is final: post-commit errors are delivery/observability failures recorded on the sink'
+  risk:
+    P: 2
+    I: 4
+    S: 4
+    C: 4
+    D: 0
+    R: 3
+    O: 3
+    X: 4
+  test: e07_postcommit.py -> assert sinks say completed
+  evidence: experiments/e07_postcommit.py; client.py:1296-1377
+  requirements:
+  - ROB-CORE-001
+  - ROB-DELIV-001
+  risk_aggregate: 22.0
+- id: FM-CORE-005
+  component: worker completion
+  provider: '-'
+  operation: pre-commit race-guard read
+  trigger: transient store error in store.get between provider success and set_result
+  basis: observed (E23)
+  preconditions: '-'
+  mechanism: exception path writes FAILED with a still-valid lease token
+  current_behaviour: provider success persisted as FAILED 'Unexpected worker error'; side effect already happened
+  persistent_state_after: FAILED
+  externally_visible: job reported failed
+  duplicate_execution: possible
+  lost_result: 'yes'
+  corrupted_state: 'yes'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: no (misreported)
+  ambiguity: success is known but discarded
+  current_logging: ERROR traceback
+  required_logging: attempt outcome=succeeded, commit_failed category
+  current_recovery: operator requeue reruns (duplicate side effect)
+  proposed_recovery: no pre-commit read; retry the fenced commit within the lease
+  risk:
+    P: 2
+    I: 4
+    S: 3
+    C: 4
+    D: 4
+    R: 3
+    O: 3
+    X: 2
+  test: e07b_precommit.py -> assert COMPLETED
+  evidence: experiments/e07b_precommit.py; client.py:1291
+  requirements:
+  - ROB-CORE-001
+  risk_aggregate: 23.5
+- id: FM-CORE-006
+  component: worker completion
+  provider: '-'
+  operation: fenced commit after lease loss
+  trigger: lease reclaimed or cancelled while the provider ran; set_result returns False
+  basis: code (C1)
+  preconditions: '-'
+  mechanism: result logged at INFO and dropped
+  current_behaviour: computed output silently discarded
+  persistent_state_after: row owned by another worker / CANCELLED
+  externally_visible: nothing
+  duplicate_execution: possible
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: lease_lost
+  retryable: n/a
+  ambiguity: result known locally, not persisted
+  current_logging: INFO
+  required_logging: WARNING + lease.result_discarded with output digest
+  current_recovery: none
+  proposed_recovery: keep orphan_output on the attempt record when the store is reachable
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 1
+    D: 3
+    R: 2
+    O: 4
+    X: 1
+  test: inject reclaim during run -> assert attempt has orphan_output
+  evidence: client.py:1296-1303
+  requirements:
+  - ROB-LEASE-001
+  risk_aggregate: 18.0
+- id: FM-CORE-007
+  component: retry/attempt accounting
+  provider: '-'
+  operation: reclaim of an interrupted job
+  trigger: worker dies after claim; job reclaimed
+  basis: observed (E12)
+  preconditions: '-'
+  mechanism: no attempt counter is persisted; retry loop is in-memory; reclaim returns the job to QUEUED unchanged
+  current_behaviour: re-executed regardless of max_retries; history erased
+  persistent_state_after: QUEUED then COMPLETED; no record of first attempt
+  externally_visible: nothing
+  duplicate_execution: 'yes'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: host_environment_failure
+  retryable: treated as fresh
+  ambiguity: first attempt outcome unknown
+  current_logging: INFO 'Reclaimed stale lease'
+  required_logging: attempt log entries + lease.reclaimed event
+  current_recovery: reclaim and rerun
+  proposed_recovery: append-only attempt log; attempt_no incremented atomically with claim; max_retries enforced
+    across lifetimes
+  risk:
+    P: 3
+    I: 4
+    S: 4
+    C: 2
+    D: 5
+    R: 3
+    O: 4
+    X: 2
+  test: e10_kill.sh with max_retries=0 -> assert no rerun
+  evidence: experiments/e10_kill.sh
+  requirements:
+  - ROB-STATE-001
+  - ROB-AMBIG-001
+  risk_aggregate: 24.0
+- id: FM-CORE-008
+  component: retry/attempt accounting
+  provider: '-'
+  operation: poison job
+  trigger: job whose execution kills the worker (OOM-kill, segfault in-process, deliberate)
+  basis: observed (E13)
+  preconditions: '-'
+  mechanism: every restart reclaims and reruns it; nothing counts attempts
+  current_behaviour: unbounded executions; every crash also interrupts and reruns other in-flight jobs
+  persistent_state_after: PROCESSING forever
+  externally_visible: crash loop under any supervisor
+  duplicate_execution: 'yes'
+  lost_result: possible
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: process_failure
+  retryable: 'no'
+  ambiguity: each attempt outcome unknown
+  current_logging: none beyond reclaim INFO
+  required_logging: attempts_exhausted event
+  current_recovery: none
+  proposed_recovery: attempts counted per epoch across lifetimes; FAILED attempts_exhausted at the bound
+  risk:
+    P: 2
+    I: 5
+    S: 3
+    C: 2
+    D: 5
+    R: 4
+    O: 4
+    X: 5
+  test: e10b_poison.sh -> assert FAILED after max attempts
+  evidence: experiments/e10b_poison.sh
+  requirements:
+  - ROB-STATE-001
+  risk_aggregate: 25.0
+- id: FM-CORE-009
+  component: state model
+  provider: '-'
+  operation: represent an unknowable outcome
+  trigger: worker dies after dispatching to a provider (esp. CLI agent with side effects)
+  basis: observed (E12, E14)
+  preconditions: '-'
+  mechanism: only 5 statuses; reclaimed job is indistinguishable from a fresh one
+  current_behaviour: non-idempotent agent work silently re-run
+  persistent_state_after: QUEUED
+  externally_visible: nothing
+  duplicate_execution: 'yes'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: host_environment_failure
+  retryable: depends on idempotency class
+  ambiguity: 'high: provider may have finished'
+  current_logging: none
+  required_logging: attempt.outcome=unknown, outcome_unknown event
+  current_recovery: rerun
+  proposed_recovery: phase=dispatched committed before side effects; non-rerunnable class -> FAILED outcome_unknown,
+    requeue_manual
+  risk:
+    P: 3
+    I: 5
+    S: 5
+    C: 2
+    D: 5
+    R: 3
+    O: 5
+    X: 2
+  test: kill after dispatch -> CLI job FAILED outcome_unknown; ollama job rerun once
+  evidence: experiments/e10_kill.sh; e18_sigterm.sh
+  requirements:
+  - ROB-AMBIG-001
+  - ROB-STATE-003
+  risk_aggregate: 27.0
+- id: FM-CORE-010
+  component: process lifecycle
+  provider: '-'
+  operation: SIGTERM to hoglah run
+  trigger: service manager stop, terminal close, wsl --shutdown, Windows Update
+  basis: observed (E14)
+  preconditions: '-'
+  mechanism: 'no signal handler: default disposition exits immediately; finally/close never run'
+  current_behaviour: in-flight jobs left PROCESSING; CLI children orphaned and still running
+  persistent_state_after: PROCESSING with live lease
+  externally_visible: process exits 143
+  duplicate_execution: possible
+  lost_result: possible
+  corrupted_state: 'no'
+  stuck_job: possible
+  failure_category: host_environment_failure
+  retryable: after lease expiry
+  ambiguity: high
+  current_logging: none
+  required_logging: shutdown.begin/drained events
+  current_recovery: reclaim after lease
+  proposed_recovery: 'handle SIGTERM/SIGINT: stop claiming, bounded drain, terminate CLI groups, close'
+  risk:
+    P: 4
+    I: 4
+    S: 3
+    C: 2
+    D: 4
+    R: 3
+    O: 3
+    X: 3
+  test: e18_sigterm.sh -> assert drain + no orphan
+  evidence: experiments/e18_sigterm.sh; cli.py:1245
+  requirements:
+  - ROB-SHUT-001
+  - ROB-CLI-001
+  risk_aggregate: 22.0
+- id: FM-CORE-011
+  component: process lifecycle
+  provider: '-'
+  operation: worker thread health
+  trigger: worker thread exits (unexpected BaseException, loop.close)
+  basis: code
+  preconditions: '-'
+  mechanism: '`hoglah run` sleeps forever without checking the thread'
+  current_behaviour: process looks healthy, processes nothing
+  persistent_state_after: QUEUED rows accumulate
+  externally_visible: nothing
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: process_failure
+  retryable: n/a
+  ambiguity: none
+  current_logging: ERROR once
+  required_logging: process exits non-zero
+  current_recovery: none
+  proposed_recovery: '`hoglah run` exits non-zero when the worker thread dies'
+  risk:
+    P: 1
+    I: 4
+    S: 5
+    C: 0
+    D: 0
+    R: 1
+    O: 5
+    X: 2
+  test: kill worker thread -> assert exit code
+  evidence: cli.py:1243-1253; client.py:1085-1093
+  requirements:
+  - ROB-SHUT-001
+  risk_aggregate: 16.0
+- id: FM-CORE-012
+  component: worker event loop
+  provider: '-'
+  operation: synchronous I/O on the loop
+  trigger: slow store (SQLite busy, Mongo 30s server selection), Galeed down, OpenAI request
+  basis: observed (E05, E06)
+  preconditions: '-'
+  mechanism: store, Galeed and OpenAI urllib calls run synchronously on the asyncio loop
+  current_behaviour: every in-flight job's heartbeat, poll and cancel freeze; leases can lapse fleet-wide
+  persistent_state_after: PROCESSING rows with stale leases
+  externally_visible: throughput collapse; duplicates in multi-worker
+  duplicate_execution: 'yes'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: resource_exhaustion (loop)
+  retryable: n/a
+  ambiguity: none
+  current_logging: none
+  required_logging: loop_stalled event + loop_lag gauge
+  current_recovery: none
+  proposed_recovery: bounded per-call/per-poll budget; non-blocking Galeed; OpenAI via to_thread/async client; timeouts
+    below lease margin
+  risk:
+    P: 3
+    I: 4
+    S: 4
+    C: 1
+    D: 4
+    R: 2
+    O: 4
+    X: 5
+  test: e11_openai_block.py, e12_galeed_down.py -> assert loop lag < budget
+  evidence: experiments/e11_openai_block.py; e12_galeed_down.py
+  requirements:
+  - ROB-LOOP-001
+  risk_aggregate: 22.5
+- id: FM-CORE-013
+  component: lease reclaim
+  provider: '-'
+  operation: wall-clock lease comparison
+  trigger: peer clock skew > lease, or local clock jumps forward > lease (WSL2 after sleep)
+  basis: observed (E17); documented (microsoft/WSL#10006)
+  preconditions: '-'
+  mechanism: reclaim compares lease_expires_at (writer's wall clock) to the reclaimer's wall clock
+  current_behaviour: live jobs reclaimed and executed twice
+  persistent_state_after: COMPLETED by second run
+  externally_visible: nothing
+  duplicate_execution: 'yes'
+  lost_result: possible
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: host_environment_failure
+  retryable: n/a
+  ambiguity: first run discarded
+  current_logging: INFO reclaim
+  required_logging: lease.reclaimed with observed ages
+  current_recovery: none
+  proposed_recovery: reclaim only after (token, expiry) unchanged across lease+margin of the reclaimer's monotonic
+    time
+  risk:
+    P: 3
+    I: 4
+    S: 5
+    C: 1
+    D: 5
+    R: 2
+    O: 4
+    X: 3
+  test: e20_skew.py -> assert one execution
+  evidence: experiments/e20_skew.py
+  requirements:
+  - ROB-LEASE-002
+  risk_aggregate: 24.0
+- id: FM-CORE-014
+  component: scheduler
+  provider: '-'
+  operation: label sequence evaluation
+  trigger: store error while listing a label group
+  basis: code (C11)
+  preconditions: '-'
+  mechanism: _eval_label_sequence returns 'ready' on exception (fail-open)
+  current_behaviour: later label dispatched before earlier label completes
+  persistent_state_after: PROCESSING out of order
+  externally_visible: ERROR log only
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'yes'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: n/a
+  ambiguity: none
+  current_logging: ERROR
+  required_logging: readiness_eval_error event
+  current_recovery: none
+  proposed_recovery: every readiness gate fails closed (wait)
+  risk:
+    P: 2
+    I: 4
+    S: 4
+    C: 4
+    D: 2
+    R: 3
+    O: 4
+    X: 2
+  test: inject list() error -> assert no out-of-order claim
+  evidence: client.py:1530-1548
+  requirements:
+  - ROB-SCHED-001
+  risk_aggregate: 23.5
+- id: FM-CORE-015
+  component: scheduler
+  provider: '-'
+  operation: fairness slot gates
+  trigger: store error reading the PROCESSING snapshot
+  basis: code (C20)
+  preconditions: '-'
+  mechanism: 'snapshot error returns [] / counts 0 peers: model/session/tag caps fail open'
+  current_behaviour: slot oversubscription, possible GPU OOM failing other jobs
+  persistent_state_after: extra PROCESSING rows
+  externally_visible: ERROR log
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: n/a
+  ambiguity: none
+  current_logging: ERROR
+  required_logging: readiness_eval_error
+  current_recovery: none
+  proposed_recovery: admission gates fail closed
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 1
+    D: 1
+    R: 2
+    O: 4
+    X: 4
+  test: inject snapshot error -> assert no admission on capped dims
+  evidence: client.py:1787-1865
+  requirements:
+  - ROB-SCHED-001
+  risk_aggregate: 17.5
+- id: FM-CORE-016
+  component: SQLite store
+  provider: '-'
+  operation: decode a row during poll
+  trigger: one row with undecodable request_json (manual edit, partial write, version skew)
+  basis: observed (E26)
+  preconditions: '-'
+  mechanism: _row_to_dict json.loads raises; the whole poll aborts every cycle
+  current_behaviour: no job is ever claimed; stats() looks normal
+  persistent_state_after: all QUEUED
+  externally_visible: ERROR each second; stats look healthy
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: corrupt_row
+  retryable: 'no'
+  ambiguity: none
+  current_logging: ERROR per second, unrate-limited
+  required_logging: row_quarantined event
+  current_recovery: none
+  proposed_recovery: tolerant list(); quarantine row to FAILED corrupt_row; isolate per-row errors
+  risk:
+    P: 1
+    I: 5
+    S: 4
+    C: 2
+    D: 0
+    R: 3
+    O: 3
+    X: 4
+  test: e26_poison_row.py -> assert healthy jobs complete
+  evidence: experiments/e26_poison_row.py; store.py:333
+  requirements:
+  - ROB-SCHED-001
+  risk_aggregate: 19.5
+- id: FM-CORE-017
+  component: cancel
+  provider: '-'
+  operation: cross-process cancel watch
+  trigger: one transient store error in _cancel_watch_loop
+  basis: code (C22)
+  preconditions: '-'
+  mechanism: watch task dies silently; remote cancel no longer interrupts the job
+  current_behaviour: cancelled job keeps running to completion (result then dropped)
+  persistent_state_after: CANCELLED
+  externally_visible: nothing
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: n/a
+  ambiguity: side effects continue after cancel
+  current_logging: nothing
+  required_logging: '-'
+  current_recovery: none
+  proposed_recovery: 'remove the watch: the fenced heartbeat detects cancel (latency <= heartbeat interval, declared)'
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 0
+    D: 2
+    R: 1
+    O: 4
+    X: 1
+  test: inject get() error in watch -> assert cancel still interrupts
+  evidence: client.py:1417-1440
+  requirements:
+  - ROB-LEASE-001
+  - ROB-CORE-002
+  risk_aggregate: 15.0
+- id: FM-CORE-018
+  component: dependencies
+  provider: '-'
+  operation: requeue of a failed parent
+  trigger: parent FAILED/CANCELLED/outcome_unknown, children already failed dependency_blocked; operator requeues
+    parent
+  basis: code (C8, C12)
+  preconditions: '-'
+  mechanism: requeue touches one row; children stay FAILED
+  current_behaviour: pipeline silently half-revived
+  persistent_state_after: children FAILED
+  externally_visible: nothing
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: dependency_failure
+  retryable: n/a
+  ambiguity: none
+  current_logging: none
+  required_logging: requeue event listing blocked dependents
+  current_recovery: manual per child
+  proposed_recovery: requeue reports cascade-failed dependents; --with-dependents option
+  risk:
+    P: 2
+    I: 3
+    S: 3
+    C: 1
+    D: 0
+    R: 2
+    O: 3
+    X: 2
+  test: requeue parent -> assert dependents reported/requeued
+  evidence: client.py:971-991; labels.py
+  requirements:
+  - ROB-AMBIG-001
+  - ROB-STATE-003
+  risk_aggregate: 13.5
+- id: FM-CORE-019
+  component: requeue
+  provider: '-'
+  operation: requeue erases evidence
+  trigger: operator requeue
+  basis: code (C6)
+  preconditions: '-'
+  mechanism: store.requeue clears result, error, lease, result_published; store-level requeue accepts COMPLETED
+  current_behaviour: previous failure evidence lost; COMPLETED can be reopened by library callers
+  persistent_state_after: QUEUED
+  externally_visible: nothing
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: none
+  current_logging: INFO
+  required_logging: requeue event with prior attempt summary
+  current_recovery: '-'
+  proposed_recovery: append-only attempt log (new epoch); COMPLETED absorbing
+  risk:
+    P: 3
+    I: 2
+    S: 4
+    C: 2
+    D: 1
+    R: 2
+    O: 4
+    X: 1
+  test: requeue -> assert attempt history kept; requeue(COMPLETED) rejected
+  evidence: store.py:676-704
+  requirements:
+  - ROB-STATE-001
+  - ROB-STATE-003
+  risk_aggregate: 17.0
+- id: FM-CORE-020
+  component: retry
+  provider: '-'
+  operation: in-claim backoff sleep
+  trigger: retryable failure; backoff in progress
+  basis: code (C9)
+  preconditions: '-'
+  mechanism: asyncio.sleep inside the claim holds lease and semaphore slot; retry count lost on restart
+  current_behaviour: slot occupied by a sleeping job; restart resets the retry budget
+  persistent_state_after: PROCESSING
+  externally_visible: looks busy
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: WARNING per attempt
+  required_logging: retry.scheduled event
+  current_recovery: '-'
+  proposed_recovery: retry = fenced PROCESSING->QUEUED with run_at; persisted
+  risk:
+    P: 4
+    I: 2
+    S: 2
+    C: 1
+    D: 1
+    R: 1
+    O: 2
+    X: 2
+  test: kill during backoff -> assert attempts preserved
+  evidence: client.py:2045-2118
+  requirements:
+  - ROB-RETRY-001
+  - ROB-STATE-001
+  risk_aggregate: 12.0
+- id: FM-CORE-021
+  component: streaming
+  provider: '-'
+  operation: diagnostic stream write
+  trigger: stream_dir full (ENOSPC), unwritable, or removed
+  basis: observed (E16)
+  preconditions: '-'
+  mechanism: ChunkWriter.open/write_chunk raise into the adapter's on_chunk
+  current_behaviour: successful inference FAILED
+  persistent_state_after: FAILED
+  externally_visible: job failed
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: storage_failure (diagnostic)
+  retryable: 'no'
+  ambiguity: none
+  current_logging: ERROR traceback
+  required_logging: stream.disabled event
+  current_recovery: '-'
+  proposed_recovery: stream errors disable the stream for that job and never change the outcome
+  risk:
+    P: 2
+    I: 3
+    S: 2
+    C: 2
+    D: 0
+    R: 1
+    O: 2
+    X: 3
+  test: e14_stream_fail.py -> assert COMPLETED
+  evidence: experiments/e14_stream_fail.py
+  requirements:
+  - ROB-CORE-001
+  risk_aggregate: 13.0
+- id: FM-CORE-022
+  component: error reporting
+  provider: '-'
+  operation: generic worker error
+  trigger: any exception outside the adapter attempt loop
+  basis: observed (E16b)
+  preconditions: '-'
+  mechanism: stored error is 'Unexpected worker error'; cause only in a log traceback
+  current_behaviour: operator cannot tell why
+  persistent_state_after: FAILED
+  externally_visible: opaque failure
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: unknown
+  retryable: 'no'
+  ambiguity: none
+  current_logging: ERROR traceback
+  required_logging: failure{category, exception_class, cause chain}
+  current_recovery: '-'
+  proposed_recovery: structured failure record on the attempt
+  risk:
+    P: 3
+    I: 2
+    S: 3
+    C: 0
+    D: 0
+    R: 2
+    O: 4
+    X: 1
+  test: inject exception -> assert category + exception_class persisted
+  evidence: client.py:1350-1379
+  requirements:
+  - ROB-CLASS-001
+  - ROB-STATE-001
+  risk_aggregate: 11.5
+- id: FM-CORE-023
+  component: error reporting
+  provider: '-'
+  operation: failure in the failure path
+  trigger: store unavailable while recording a failure
+  basis: code
+  preconditions: '-'
+  mechanism: '`except Exception: pass` swallows it; job stays PROCESSING until lease expiry'
+  current_behaviour: job retried later with no record
+  persistent_state_after: PROCESSING
+  externally_visible: nothing
+  duplicate_execution: possible
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: after lease
+  ambiguity: medium
+  current_logging: none
+  required_logging: WARNING + counter
+  current_recovery: reclaim
+  proposed_recovery: bounded retry of the fenced write; otherwise lease_lost path
+  risk:
+    P: 2
+    I: 2
+    S: 4
+    C: 1
+    D: 3
+    R: 2
+    O: 4
+    X: 1
+  test: store down during failure write -> assert WARNING + attempt record
+  evidence: client.py:1378-1379
+  requirements:
+  - ROB-LEASE-001
+  - ROB-CORE-001
+  risk_aggregate: 17.0
+- id: FM-CORE-024
+  component: metrics
+  provider: '-'
+  operation: scrape during store outage
+  trigger: store unavailable
+  basis: code (C23)
+  preconditions: '-'
+  mechanism: metrics_text() calls stats() -> store; the whole scrape fails, in-memory counters included
+  current_behaviour: monitoring blind when most needed
+  persistent_state_after: '-'
+  externally_visible: scrape error
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: n/a
+  ambiguity: none
+  current_logging: '-'
+  required_logging: store-independent liveness gauges
+  current_recovery: '-'
+  proposed_recovery: liveness gauges in memory; store gauges degrade to absent
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 0
+    D: 0
+    R: 1
+    O: 5
+    X: 2
+  test: store down -> scrape still returns degraded gauges
+  evidence: client.py:2351; metrics_server.py
+  requirements:
+  - ROB-LOOP-001
+  risk_aggregate: 14.0
+- id: FM-CORE-025
+  component: scheduler
+  provider: '-'
+  operation: preload tick and cycle walk
+  trigger: large queue; preload enabled
+  basis: code (C19, C21)
+  preconditions: '-'
+  mechanism: preload repeats readiness, an unlimited PROCESSING snapshot and list(500) on the loop every 0.5s; cycle
+    walk does O(depth) reads per row per poll
+  current_behaviour: loop time grows with queue size
+  persistent_state_after: '-'
+  externally_visible: slow worker
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: resource_exhaustion
+  retryable: n/a
+  ambiguity: none
+  current_logging: '-'
+  required_logging: loop_lag gauge
+  current_recovery: '-'
+  proposed_recovery: preload reuses the poll cache; cycles rejected at enqueue
+  risk:
+    P: 2
+    I: 2
+    S: 3
+    C: 0
+    D: 1
+    R: 1
+    O: 3
+    X: 3
+  test: large-queue benchmark -> loop lag bound
+  evidence: client.py:1442-1460,1597-1763
+  requirements:
+  - ROB-LOOP-001
+  - ROB-SCHED-001
+  risk_aggregate: 12.0
+- id: FM-CONF-001
+  component: configuration
+  provider: '-'
+  operation: load dict/list settings from env
+  trigger: documented formats HOGLAH_CLI_BINARIES=claude=/p, HOGLAH_MODEL_SLOTS=a=1, HOGLAH_TAG_SLOTS, HOGLAH_OLLAMA_HOSTS=a,b
+  basis: observed (E22)
+  preconditions: '-'
+  mechanism: pydantic-settings JSON-decodes complex env values before Hoglah's validator
+  current_behaviour: startup crash (SettingsError)
+  persistent_state_after: '-'
+  externally_visible: loud
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: configuration_error
+  retryable: 'no'
+  ambiguity: none
+  current_logging: traceback
+  required_logging: '-'
+  current_recovery: '-'
+  proposed_recovery: accept documented formats (or correct docs); validate budgets at startup
+  risk:
+    P: 3
+    I: 2
+    S: 0
+    C: 0
+    D: 0
+    R: 1
+    O: 1
+    X: 1
+  test: env matrix test
+  evidence: config.py; E22
+  requirements:
+  - ROB-CONF-001
+  risk_aggregate: 5.0
+- id: FM-RETRY-001
+  component: classification
+  provider: '-'
+  operation: classify_error regex fallback
+  trigger: error text containing numbers 400-599, 'connection', 'invalid', etc. (often prompt/model fragments)
+  basis: observed (E11)
+  preconditions: '-'
+  mechanism: regex over str(exc) including any 3-digit 4xx/5xx number anywhere
+  current_behaviour: permanent errors retried / transient not retried depending on wording
+  persistent_state_after: '-'
+  externally_visible: wrong retry decisions
+  duplicate_execution: possible
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: misjudged
+  ambiguity: none
+  current_logging: WARNING per attempt
+  required_logging: category + classifier source
+  current_recovery: '-'
+  proposed_recovery: structured signals first; regex only on provider-originated error text
+  risk:
+    P: 3
+    I: 2
+    S: 3
+    C: 0
+    D: 2
+    R: 1
+    O: 3
+    X: 1
+  test: classify_real.py table as unit tests
+  evidence: experiments/classify_real.py; models.py:155-249
+  requirements:
+  - ROB-CLASS-001
+  risk_aggregate: 12.5
+- id: FM-RETRY-002
+  component: retry policy
+  provider: '-'
+  operation: default budget vs provider restart
+  trigger: Ollama/OpenAI host down for longer than ~3 s (restart, model swap, WSL host change)
+  basis: observed (E20)
+  preconditions: '-'
+  mechanism: 3 attempts with 1s/2s backoff
+  current_behaviour: every queued job for that backend fails permanently
+  persistent_state_after: FAILED
+  externally_visible: mass failure
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: network_transient
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: WARNING per attempt
+  required_logging: retry.scheduled with budget remaining
+  current_recovery: '-'
+  proposed_recovery: per-category elapsed budgets (minutes for unavailable); jitter > 0; health gauge
+  risk:
+    P: 4
+    I: 4
+    S: 1
+    C: 0
+    D: 0
+    R: 2
+    O: 2
+    X: 3
+  test: Ollama down 30 s -> queued jobs complete after it returns
+  evidence: experiments/e_ollama_e2e.py
+  requirements:
+  - ROB-RETRY-001
+  risk_aggregate: 11.0
+- id: FM-RETRY-003
+  component: classification
+  provider: '-'
+  operation: caller error returned as 5xx
+  trigger: Ollama rejects an option type with HTTP 500
+  basis: observed (E19, E20)
+  preconditions: '-'
+  mechanism: 5xx -> server -> transient
+  current_behaviour: permanent caller error retried 3x
+  persistent_state_after: FAILED eventually
+  externally_visible: wasted attempts
+  duplicate_execution: 'yes'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: caller_invalid
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING
+  required_logging: category caller_invalid
+  current_recovery: '-'
+  proposed_recovery: provider-specific mapping; 5xx-with-validation-text retried at most once
+  risk:
+    P: 3
+    I: 1
+    S: 1
+    C: 0
+    D: 1
+    R: 0
+    O: 2
+    X: 1
+  test: unit test on recorded Ollama 500 body
+  evidence: E19
+  requirements:
+  - ROB-CLASS-001
+  - ROB-BACKEND-001
+  risk_aggregate: 6.5
+- id: FM-RETRY-004
+  component: classification
+  provider: '-'
+  operation: unknown errors
+  trigger: any exception the classifier does not recognise (all CLI exits today)
+  basis: observed (E10)
+  preconditions: '-'
+  mechanism: classify_error -> [] -> never retried; error stored as a string; class lost
+  current_behaviour: no cause recorded; transient CLI failures never retried
+  persistent_state_after: FAILED
+  externally_visible: opaque
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: unknown
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING
+  required_logging: failure{category=unknown, exception_class, excerpt}
+  current_recovery: '-'
+  proposed_recovery: 'unknown: at most one retry, and only for rerunnable jobs with a definite outcome; full diagnostics'
+  risk:
+    P: 4
+    I: 2
+    S: 3
+    C: 0
+    D: 0
+    R: 2
+    O: 4
+    X: 1
+  test: unit test
+  evidence: E10; classify_real.py
+  requirements:
+  - ROB-CLASS-001
+  risk_aggregate: 12.0
+- id: FM-DELIV-001
+  component: named callbacks
+  provider: '-'
+  operation: restart redelivery
+  trigger: any Hoglah construction with a callbacks registry
+  basis: observed (E15)
+  preconditions: '-'
+  mechanism: re-fires callbacks for the first 200 rows of list() (oldest), no delivered marker, any instance
+  current_behaviour: already-delivered callbacks repeat every restart; recent missed ones are never redelivered
+  persistent_state_after: '-'
+  externally_visible: duplicate and missing callbacks
+  duplicate_execution: 'yes'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: none
+  current_logging: exceptions swallowed with pass
+  required_logging: delivery events
+  current_recovery: '-'
+  proposed_recovery: per-sink delivery state written with the terminal commit; redelivery driven by it
+  risk:
+    P: 4
+    I: 3
+    S: 4
+    C: 1
+    D: 4
+    R: 2
+    O: 4
+    X: 2
+  test: e09_redeliver.py -> assert exactly-once-per-sink-record semantics
+  evidence: experiments/e09_redeliver.py; client.py:1043-1069
+  requirements:
+  - ROB-DELIV-001
+  risk_aggregate: 20.5
+- id: FM-DELIV-002
+  component: direct callbacks
+  provider: '-'
+  operation: callable registration
+  trigger: job completes before submit() registers the callable (Galeed emit blocking, fast worker)
+  basis: observed (E05)
+  preconditions: '-'
+  mechanism: callable stored after enqueue commit and after the Galeed emit
+  current_behaviour: callback never fires
+  persistent_state_after: COMPLETED
+  externally_visible: nothing
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: none
+  current_logging: none
+  required_logging: '-'
+  current_recovery: '-'
+  proposed_recovery: register before enqueue; fire immediately on dedupe hit of a terminal row; warn on start_worker=False
+  risk:
+    P: 2
+    I: 3
+    S: 5
+    C: 0
+    D: 0
+    R: 2
+    O: 5
+    X: 1
+  test: e12_galeed_down.py -> assert callback fired
+  evidence: experiments/e12_galeed_down.py; client.py:663-683
+  requirements:
+  - ROB-DELIV-001
+  risk_aggregate: 15.5
+- id: FM-DELIV-003
+  component: HTTP callback
+  provider: '-'
+  operation: POST result
+  trigger: process exits soon after completion; receiver slow; ack lost
+  basis: code + inference
+  preconditions: '-'
+  mechanism: daemon thread, no persistence, no delivery id; close() does not wait
+  current_behaviour: callback lost on exit; duplicate POST on ack loss with no idempotency key
+  persistent_state_after: '-'
+  externally_visible: receiver never told / told twice
+  duplicate_execution: 'yes'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: network_transient
+  retryable: 'yes'
+  ambiguity: ack-loss ambiguity
+  current_logging: WARNING after retries
+  required_logging: delivery events
+  current_recovery: 3 attempts in-thread
+  proposed_recovery: durable sink record + sweeper; Idempotency-Key = delivery_id
+  risk:
+    P: 3
+    I: 3
+    S: 4
+    C: 0
+    D: 3
+    R: 2
+    O: 3
+    X: 2
+  test: kill after completion -> assert POST eventually delivered once per delivery_id
+  evidence: client.py:2232-2313
+  requirements:
+  - ROB-DELIV-001
+  risk_aggregate: 17.0
+- id: FM-DELIV-004
+  component: output file
+  provider: '-'
+  operation: atomic write
+  trigger: power loss / WSL termination after rename; concurrent writers
+  basis: code + theoretical
+  preconditions: '-'
+  mechanism: fixed tmp name, no fsync of file or directory
+  current_behaviour: zero-length or missing file after crash; tmp collision
+  persistent_state_after: '-'
+  externally_visible: poller sees bad file
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'yes'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: ERROR
+  required_logging: delivery.failed
+  current_recovery: '-'
+  proposed_recovery: unique tmp, fsync file+dir, rename; sink record
+  risk:
+    P: 1
+    I: 3
+    S: 3
+    C: 2
+    D: 0
+    R: 2
+    O: 3
+    X: 1
+  test: fault-inject fsync/rename failures
+  evidence: client.py:2222-2230
+  requirements:
+  - ROB-DELIV-001
+  risk_aggregate: 14.0
+- id: FM-DELIV-005
+  component: delivery
+  provider: '-'
+  operation: terminal write in a non-worker process
+  trigger: '`hoglah cancel` (CLI), cascades, start_worker=False callers'
+  basis: code (N43)
+  preconditions: '-'
+  mechanism: _deliver runs in the short-lived process on daemon threads; broker egress waits for a worker restart
+  current_behaviour: cancel notifications lost
+  persistent_state_after: CANCELLED
+  externally_visible: nothing
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: none
+  current_logging: none
+  required_logging: delivery pending report
+  current_recovery: '-'
+  proposed_recovery: sink records stay pending until confirmed; any worker's sweeper completes them
+  risk:
+    P: 3
+    I: 3
+    S: 4
+    C: 0
+    D: 0
+    R: 2
+    O: 4
+    X: 2
+  test: CLI cancel -> assert sink completed by worker
+  evidence: client.py:932-969
+  requirements:
+  - ROB-DELIV-001
+  risk_aggregate: 14.5
+- id: FM-ADMIN-001
+  component: CLI clear
+  provider: '-'
+  operation: delete with confirmation
+  trigger: user runs `hoglah clear` and answers no
+  basis: observed (E25)
+  preconditions: '-'
+  mechanism: h.clear() deletes before typer.confirm; no filter deletes QUEUED/PROCESSING
+  current_behaviour: jobs deleted while the tool says 'Clear cancelled.'
+  persistent_state_after: rows gone
+  externally_visible: misleading message
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'yes'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: none
+  current_logging: none
+  required_logging: rows_deleted event
+  current_recovery: none
+  proposed_recovery: dry-run count -> confirm -> delete; store-level guards
+  risk:
+    P: 3
+    I: 5
+    S: 5
+    C: 5
+    D: 0
+    R: 5
+    O: 4
+    X: 3
+  test: echo n | hoglah clear -> assert rows remain
+  evidence: cli.py:498-522; E25
+  requirements:
+  - ROB-ADMIN-001
+  risk_aggregate: 27.5
+- id: FM-ADMIN-002
+  component: store delete
+  provider: '-'
+  operation: delete_jobs / delete_job
+  trigger: clear without filter; remove(cancel=False); retention scripts (SQLite and Mongo)
+  basis: code (C24)
+  preconditions: '-'
+  mechanism: unconditional deletes of non-terminal rows, unpublished outbox rows, parents of live dependents
+  current_behaviour: running jobs lose their row; children blocked 'not found'; outbox results never published
+  persistent_state_after: rows gone
+  externally_visible: children fail
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'yes'
+  stuck_job: 'yes'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: none
+  current_logging: none
+  required_logging: rows_deleted
+  current_recovery: none
+  proposed_recovery: 'store-level guards: skip non-terminal, unsealed, pending-sink, live-dependent, young dedupe-keyed
+    rows'
+  risk:
+    P: 2
+    I: 5
+    S: 4
+    C: 5
+    D: 1
+    R: 5
+    O: 4
+    X: 4
+  test: delete with live dependents -> refused
+  evidence: store.py:733-763; mongo_store.py:407-422
+  requirements:
+  - ROB-ADMIN-001
+  - ROB-STATE-003
+  risk_aggregate: 27.0
+- id: FM-ADMIN-003
+  component: idempotency
+  provider: '-'
+  operation: dedupe horizon
+  trigger: idempotency_key / correlation_id resubmitted after the row was deleted
+  basis: code (N41)
+  preconditions: '-'
+  mechanism: uniqueness lives only on the row
+  current_behaviour: duplicate job
+  persistent_state_after: new row
+  externally_visible: nothing
+  duplicate_execution: 'yes'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: none
+  current_logging: none
+  required_logging: '-'
+  current_recovery: '-'
+  proposed_recovery: 'retention floor: keyed rows younger than dedupe_window are not deleted; window declared'
+  risk:
+    P: 2
+    I: 3
+    S: 3
+    C: 0
+    D: 4
+    R: 2
+    O: 3
+    X: 2
+  test: clear then resubmit within window -> same id
+  evidence: store.py:346-420
+  requirements:
+  - ROB-ADMIN-001
+  risk_aggregate: 16.0
+- id: FM-ADMIN-004
+  component: bulk requeue
+  provider: '-'
+  operation: requeue --all-failed
+  trigger: operator or cron bulk requeue
+  basis: code (N25, N47)
+  preconditions: '-'
+  mechanism: requeues every FAILED row including outcome-unknown agent jobs and poison/corrupt rows
+  current_behaviour: non-idempotent agents rerun; workers re-poisoned
+  persistent_state_after: QUEUED
+  externally_visible: nothing
+  duplicate_execution: 'yes'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: high for agent jobs
+  current_logging: INFO
+  required_logging: requeue events with skipped ids
+  current_recovery: '-'
+  proposed_recovery: bulk skips outcome_unknown, unreapable, corrupt_row, attempts_exhausted, unsealed
+  risk:
+    P: 2
+    I: 4
+    S: 3
+    C: 1
+    D: 5
+    R: 2
+    O: 3
+    X: 3
+  test: bulk requeue -> skipped ids reported
+  evidence: client.py:2368-2388
+  requirements:
+  - ROB-AMBIG-001
+  risk_aggregate: 20.0
+- id: FM-BATCH-001
+  component: submit_batch
+  provider: '-'
+  operation: partial batch
+  trigger: crash or error midway through submit_batch
+  basis: code (C13, N26)
+  preconditions: '-'
+  mechanism: items persisted one at a time; in-process compensation only
+  current_behaviour: running prefix whose children never exist; compensation may cancel dispatched work
+  persistent_state_after: prefix rows
+  externally_visible: batch looks complete to wait_batch
+  duplicate_execution: possible
+  lost_result: 'no'
+  corrupted_state: 'yes'
+  stuck_job: possible
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: medium
+  current_logging: none
+  required_logging: batch_abandoned
+  current_recovery: in-process remove
+  proposed_recovery: atomic release (SQLite transaction; Mongo seal-token header CAS)
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 3
+    D: 2
+    R: 3
+    O: 3
+    X: 2
+  test: kill mid-batch -> no unsealed item claimed
+  evidence: client.py:764-807
+  requirements:
+  - ROB-BATCH-001
+  risk_aggregate: 20.5
+- id: FM-BATCH-002
+  component: submit_batch
+  provider: '-'
+  operation: compensation scope
+  trigger: batch item idempotency_key matches an existing job, then a later item fails
+  basis: code (C25, N33)
+  preconditions: '-'
+  mechanism: ids assigned before submit; compensation removes every returned id
+  current_behaviour: pre-existing (even COMPLETED) jobs deleted; children point at never-persisted ids
+  persistent_state_after: rows gone
+  externally_visible: unrelated jobs disappear
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'yes'
+  stuck_job: 'yes'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: none
+  current_logging: none
+  required_logging: '-'
+  current_recovery: '-'
+  proposed_recovery: resolve keys before ids; compensation touches only rows this call inserted
+  risk:
+    P: 1
+    I: 5
+    S: 4
+    C: 5
+    D: 0
+    R: 4
+    O: 4
+    X: 4
+  test: batch with existing key + failing item -> existing job survives
+  evidence: client.py:764-807; batch.py
+  requirements:
+  - ROB-BATCH-001
+  risk_aggregate: 25.0
+- id: FM-BRIDGE-001
+  component: Kafka ingress
+  provider: kafka
+  operation: handle message failure
+  trigger: transient store error while enqueuing message N
+  basis: observed (E18, modelled transport); documented Kafka commit semantics
+  preconditions: '-'
+  mechanism: no seek-back; committing N+1 commits past N
+  current_behaviour: message silently lost (not in store, not DLT, not redelivered)
+  persistent_state_after: '-'
+  externally_visible: caller waits forever
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: ERROR 'not acking (will retry)' (false)
+  required_logging: ingress.paused / ingress.poison
+  current_recovery: none
+  proposed_recovery: seek back / pause; store outage pauses consumer; poison budget then DLT then ack
+  risk:
+    P: 2
+    I: 5
+    S: 5
+    C: 1
+    D: 0
+    R: 4
+    O: 4
+    X: 3
+  test: e19_kafka_skip.py -> assert c1 enqueued
+  evidence: experiments/e19_kafka_skip.py; kafka_bridge.py:516-541
+  requirements:
+  - ROB-BRIDGE-001
+  risk_aggregate: 20.5
+- id: FM-BRIDGE-002
+  component: Kafka ingress
+  provider: kafka
+  operation: dead-letter write fails
+  trigger: DLT produce fails for a poison message
+  basis: inference (same mechanism as FM-BRIDGE-001)
+  preconditions: '-'
+  mechanism: not committed, but the next message's commit skips it
+  current_behaviour: poison message lost
+  persistent_state_after: '-'
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: provider_transient
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: ERROR
+  required_logging: '-'
+  current_recovery: none
+  proposed_recovery: never commit past an unhandled offset
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 0
+    D: 0
+    R: 3
+    O: 4
+    X: 2
+  test: fake transport DLT failure
+  evidence: kafka_bridge.py:373-377
+  requirements:
+  - ROB-BRIDGE-001
+  risk_aggregate: 14.5
+- id: FM-BRIDGE-003
+  component: RabbitMQ ingress
+  provider: rabbitmq
+  operation: consumer after failure / broker restart
+  trigger: one un-acked message with prefetch=1; broker connection drop
+  basis: 'inference (code: no consumer reconnect; prefetch default 1)'
+  preconditions: '-'
+  mechanism: un-acked message holds the only prefetch slot; consumer generator dead after disconnect
+  current_behaviour: ingress stalls until process restart
+  persistent_state_after: '-'
+  externally_visible: error log each second
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: network_transient
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: ERROR per poll
+  required_logging: ingress.paused
+  current_recovery: none
+  proposed_recovery: nack(requeue) with backoff; consumer reconnect
+  risk:
+    P: 2
+    I: 4
+    S: 3
+    C: 0
+    D: 0
+    R: 2
+    O: 3
+    X: 2
+  test: RUN_RABBITMQ_TESTS broker restart test
+  evidence: rabbitmq.py:127-150
+  requirements:
+  - ROB-BRIDGE-001
+  risk_aggregate: 13.0
+- id: FM-BRIDGE-004
+  component: Redis ingress
+  provider: redis
+  operation: pending entries
+  trigger: handler failure at runtime; consumer renamed or dead
+  basis: code
+  preconditions: '-'
+  mechanism: PEL drained once at startup; no XAUTOCLAIM
+  current_behaviour: failed entries wait for a restart; a dead consumer's entries are never claimed
+  persistent_state_after: '-'
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: '-'
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: ERROR
+  required_logging: '-'
+  current_recovery: none
+  proposed_recovery: periodic XAUTOCLAIM of idle pending entries
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 0
+    D: 0
+    R: 2
+    O: 3
+    X: 1
+  test: RUN_REDIS_TESTS PEL test
+  evidence: redis_streams.py:97-106
+  requirements:
+  - ROB-BRIDGE-001
+  risk_aggregate: 13.0
+- id: FM-BRIDGE-005
+  component: egress outbox
+  provider: '-'
+  operation: re-publish unpublished results
+  trigger: live publish fails while the process keeps running
+  basis: code
+  preconditions: '-'
+  mechanism: outbox swept only at process startup
+  current_behaviour: result unpublished until the next restart (days for a daemon)
+  persistent_state_after: result_published=0
+  externally_visible: caller waits
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: provider_transient
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: WARNING
+  required_logging: delivery events
+  current_recovery: startup sweep
+  proposed_recovery: periodic sweeper over per-sink records
+  risk:
+    P: 3
+    I: 4
+    S: 4
+    C: 0
+    D: 0
+    R: 2
+    O: 3
+    X: 2
+  test: broker down 30 s -> result published without restart
+  evidence: kafka_bridge.py:464-484,660-690
+  requirements:
+  - ROB-DELIV-001
+  risk_aggregate: 15.0
+- id: FM-BRIDGE-006
+  component: messaging submitter
+  provider: '-'
+  operation: submit with timeout
+  trigger: submitter wait expires or publish unacknowledged; caller retries
+  basis: code (N42)
+  preconditions: '-'
+  mechanism: fresh uuid4 correlation id per call; timeout reported as failure; job timeout = wait timeout
+  current_behaviour: job executed twice (no bridge dedupe possible)
+  persistent_state_after: two rows
+  externally_visible: MessagingSubmitError
+  duplicate_execution: 'yes'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: timeout
+  retryable: ambiguous
+  ambiguity: high
+  current_logging: '-'
+  required_logging: '-'
+  current_recovery: '-'
+  proposed_recovery: caller-supplied correlation_id; SubmitOutcomeUnknown; separate job and wait timeouts
+  risk:
+    P: 3
+    I: 4
+    S: 3
+    C: 0
+    D: 5
+    R: 2
+    O: 3
+    X: 2
+  test: 'fake transport: unacked publish -> retry with same id -> one job'
+  evidence: messaging_submitter.py:108-140
+  requirements:
+  - ROB-BRIDGE-001
+  risk_aggregate: 18.5
+- id: FM-BRIDGE-007
+  component: messaging submitter
+  provider: '-'
+  operation: retry resolution
+  trigger: retry with the same correlation id after an unknown outcome (Rabbit, Redis)
+  basis: code (N48)
+  preconditions: '-'
+  mechanism: dedupe hit acked silently; reply route frozen to first (possibly deleted) queue; Redis reads only after
+    its new tail
+  current_behaviour: caller never receives a completed result
+  persistent_state_after: '-'
+  externally_visible: SubmitOutcomeUnknown forever
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: medium
+  current_logging: '-'
+  required_logging: reply route events
+  current_recovery: '-'
+  proposed_recovery: append reply-route sink on route change (Rabbit); since-based log read (Redis/Kafka); cap routes
+    per job
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 0
+    D: 1
+    R: 2
+    O: 3
+    X: 2
+  test: fake transports per broker
+  evidence: kafka_bridge.py:542-588; messaging_submitter.py:227,268
+  requirements:
+  - ROB-BRIDGE-001
+  - ROB-DELIV-001
+  risk_aggregate: 14.5
+- id: FM-BRIDGE-008
+  component: egress outbox
+  provider: '-'
+  operation: broker config change
+  trigger: results republished after switching cluster/URL
+  basis: code (N53)
+  preconditions: '-'
+  mechanism: outbox publishes through whatever transport is configured now and marks published
+  current_behaviour: result delivered to the wrong cluster; caller never receives it
+  persistent_state_after: result_published=1
+  externally_visible: nothing
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: configuration_error
+  retryable: n/a
+  ambiguity: none
+  current_logging: none
+  required_logging: '-'
+  current_recovery: '-'
+  proposed_recovery: sink target snapshot incl. broker_id; mismatched workers never publish/mark
+  risk:
+    P: 1
+    I: 3
+    S: 5
+    C: 1
+    D: 0
+    R: 3
+    O: 4
+    X: 1
+  test: switch broker config -> assert sink untouched
+  evidence: kafka_bridge.py:637-690
+  requirements:
+  - ROB-DELIV-001
+  risk_aggregate: 16.5
+- id: FM-GALEED-001
+  component: Galeed emit
+  provider: galeed
+  operation: trace emission during Mongo outage
+  trigger: galeed_enabled and its Mongo unreachable/slow
+  basis: observed (E05)
+  preconditions: '-'
+  mechanism: synchronous insert_one with 2 s server selection on the submit thread and the worker loop
+  current_behaviour: submit() blocks 2 s; ~4 s loop block per job; heartbeat starvation; lost direct callbacks
+  persistent_state_after: '-'
+  externally_visible: slowness
+  duplicate_execution: possible
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: logging_failure
+  retryable: n/a
+  ambiguity: none
+  current_logging: DEBUG only
+  required_logging: WARNING rate-limited + dropped-event counter
+  current_recovery: none
+  proposed_recovery: bounded non-blocking emitter; drops counted; optional spool
+  risk:
+    P: 3
+    I: 4
+    S: 4
+    C: 0
+    D: 3
+    R: 1
+    O: 4
+    X: 5
+  test: e12_galeed_down.py -> submit < 50 ms, loop lag bounded
+  evidence: experiments/e12_galeed_down.py; tracing.py
+  requirements:
+  - ROB-LOG-001
+  - ROB-LOOP-001
+  risk_aggregate: 19.5
+- id: FM-GALEED-002
+  component: Galeed emit
+  provider: galeed
+  operation: visibility of trace loss
+  trigger: any Galeed failure
+  basis: code
+  preconditions: '-'
+  mechanism: every failure logged at DEBUG; no counter
+  current_behaviour: central observability silently absent
+  persistent_state_after: '-'
+  externally_visible: nothing
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: logging_failure
+  retryable: n/a
+  ambiguity: none
+  current_logging: DEBUG
+  required_logging: WARNING + counter + next-event drop count
+  current_recovery: '-'
+  proposed_recovery: WARNING rate-limited; hoglah_trace_dropped_total
+  risk:
+    P: 3
+    I: 2
+    S: 5
+    C: 0
+    D: 0
+    R: 1
+    O: 5
+    X: 1
+  test: Galeed down -> WARNING + counter
+  evidence: tracing.py:130-131,287-288
+  requirements:
+  - ROB-LOG-001
+  risk_aggregate: 14.5
+- id: FM-GALEED-003
+  component: Galeed events
+  provider: galeed
+  operation: incident reconstruction
+  trigger: any retry, reclaim, lease loss, delivery failure
+  basis: code
+  preconditions: '-'
+  mechanism: only queued/started/completed/failed/cancelled; error as summary[:120]
+  current_behaviour: retries, reclaims, ambiguous outcomes and delivery failures invisible centrally
+  persistent_state_after: '-'
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: '-'
+  current_logging: 5 lifecycle events
+  required_logging: attempt/retry/lease/delivery/recovery events with category, attempt_no
+  current_recovery: '-'
+  proposed_recovery: event set in ROB-LOG-001 keyed by (job_id, attempt_no, seq, event_id)
+  risk:
+    P: 5
+    I: 2
+    S: 4
+    C: 0
+    D: 0
+    R: 1
+    O: 5
+    X: 1
+  test: event-sequence assertions in fault tests
+  evidence: tracing.py:31-35
+  requirements:
+  - ROB-LOG-001
+  risk_aggregate: 14.0
+- id: FM-GALEED-004
+  component: Galeed events
+  provider: galeed
+  operation: cancel event status
+  trigger: cancel
+  basis: code (N46)
+  preconditions: '-'
+  mechanism: JOB_CANCELLED emitted with status='completed'
+  current_behaviour: cancels misread as completions
+  persistent_state_after: '-'
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: '-'
+  current_logging: '-'
+  required_logging: status == row status
+  current_recovery: '-'
+  proposed_recovery: event status equals resulting job status
+  risk:
+    P: 5
+    I: 1
+    S: 3
+    C: 0
+    D: 0
+    R: 0
+    O: 2
+    X: 1
+  test: unit
+  evidence: client.py:957-964
+  requirements:
+  - ROB-LOG-001
+  risk_aggregate: 9.5
+- id: FM-SEC-001
+  component: result payloads
+  provider: '-'
+  operation: secret leakage
+  trigger: per-job metadata.api_key (OpenAI adapter) or other secrets in metadata
+  basis: observed (E24)
+  preconditions: '-'
+  mechanism: JobResult.metadata/parameters copy request metadata
+  current_behaviour: secret in result_json, output file (twice), callback POST, broker result, record_io
+  persistent_state_after: secret persisted
+  externally_visible: leak to receivers
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: n/a
+  ambiguity: '-'
+  current_logging: '-'
+  required_logging: never log secrets
+  current_recovery: '-'
+  proposed_recovery: redact secret keys in every sink, excerpt and Galeed record
+  risk:
+    P: 3
+    I: 4
+    S: 4
+    C: 0
+    D: 0
+    R: 3
+    O: 3
+    X: 3
+  test: submit with api_key -> grep all sinks
+  evidence: client.py:2061-2084; http_adapter.py
+  requirements:
+  - ROB-SEC-001
+  risk_aggregate: 16.0
+- id: FM-SEC-002
+  component: CLI backends
+  provider: '-'
+  operation: untrusted workdir / remote selection
+  trigger: job workdir contains .claude/settings.json hooks or .mcp.json; broker message selects a CLI backend
+  basis: documented (Claude headless docs); code
+  preconditions: '-'
+  mechanism: claude -p runs project hooks/MCP even in untrusted folders; brokers may set backend
+  current_behaviour: workdir content executes; remote message triggers a local agent
+  persistent_state_after: '-'
+  externally_visible: '-'
+  duplicate_execution: 'yes'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: authorisation
+  retryable: n/a
+  ambiguity: '-'
+  current_logging: '-'
+  required_logging: '-'
+  current_recovery: '-'
+  proposed_recovery: claude --bare; broker backend allow-list
+  risk:
+    P: 2
+    I: 4
+    S: 2
+    C: 2
+    D: 3
+    R: 3
+    O: 3
+    X: 3
+  test: doc + unit
+  evidence: cli_adapters.py:54-77; kafka_bridge.py:160-265
+  requirements:
+  - ROB-SEC-001
+  risk_aggregate: 18.5
+- id: FM-STORAGE-001
+  component: SQLite store
+  provider: '-'
+  operation: database on a Windows-mounted path
+  trigger: db_path under /mnt/c (drvfs/9p) with WAL
+  basis: theoretical (SQLite WAL needs shared-memory locking)
+  preconditions: '-'
+  mechanism: unreliable locking across processes on network-like filesystems
+  current_behaviour: corruption or lock errors
+  persistent_state_after: '-'
+  externally_visible: '-'
+  duplicate_execution: possible
+  lost_result: possible
+  corrupted_state: 'yes'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: '-'
+  ambiguity: '-'
+  current_logging: '-'
+  required_logging: startup warning
+  current_recovery: '-'
+  proposed_recovery: warn at startup when db_path is on drvfs/9p; document
+  risk:
+    P: 1
+    I: 5
+    S: 3
+    C: 5
+    D: 2
+    R: 4
+    O: 3
+    X: 3
+  test: doc check
+  evidence: store.py:240-259
+  requirements:
+  - ROB-CONF-001
+  risk_aggregate: 24.5
+- id: FM-STORAGE-002
+  component: Mongo store
+  provider: '-'
+  operation: ambiguous write acknowledgement
+  trigger: network error after the primary applied set_result
+  basis: inference
+  preconditions: '-'
+  mechanism: retryable write retried once, then exception -> generic failure path -> FAILED delivered while row
+    is COMPLETED
+  current_behaviour: contradictory delivery (same shape as FM-CORE-004)
+  persistent_state_after: COMPLETED
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'yes'
+  stuck_job: 'no'
+  failure_category: storage_failure
+  retryable: '-'
+  ambiguity: commit outcome unknown
+  current_logging: ERROR
+  required_logging: '-'
+  current_recovery: '-'
+  proposed_recovery: commit retried within lease; re-read the fenced row to resolve; never deliver FAILED for an
+    unresolved commit
+  risk:
+    P: 1
+    I: 4
+    S: 3
+    C: 4
+    D: 0
+    R: 3
+    O: 3
+    X: 3
+  test: fake Mongo raising after apply
+  evidence: mongo_store.py:239-266
+  requirements:
+  - ROB-CORE-001
+  risk_aggregate: 19.5
+- id: FM-CLI-001
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: worker started with an open stdin pipe
+  basis: observed (codex E09); documented
+  preconditions: '-'
+  mechanism: CLI reads piped stdin to EOF
+  current_behaviour: job PROCESSING forever, heartbeating
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: timeout
+  retryable: after kill
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 5
+    S: 5
+    C: 0
+    D: 0
+    R: 2
+    O: 5
+    X: 2
+  test: sleep|codex probe; fake CLI reading stdin
+  evidence: E09
+  requirements:
+  - ROB-CLI-001
+  risk_aggregate: 18.5
+- id: FM-CLI-002
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: 'interactive prompt, hung network, quota hang (gemini #10925)'
+  basis: code + issue
+  preconditions: '-'
+  mechanism: no default execution timeout
+  current_behaviour: PROCESSING forever unless timeout_seconds set
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: timeout
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 4
+    S: 5
+    C: 0
+    D: 0
+    R: 2
+    O: 5
+    X: 2
+  test: fake CLI that sleeps
+  evidence: cli_adapters.py:252-331
+  requirements:
+  - ROB-CLI-001
+  risk_aggregate: 17.5
+- id: FM-CLI-003
+  component: provider adapter
+  provider: claude, codex, kiro
+  operation: execute job
+  trigger: prompt beginning with '-'
+  basis: observed (E08)
+  preconditions: '-'
+  mechanism: prompt parsed as an option; '--version' exits 0
+  current_behaviour: COMPLETED with wrong payload
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: caller_invalid
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 2
+    D: 0
+    R: 1
+    O: 4
+    X: 1
+  test: real CLIs with prompt '--version'
+  evidence: E08
+  requirements:
+  - ROB-CLI-001
+  - ROB-BACKEND-001
+  risk_aggregate: 16.0
+- id: FM-CLI-004
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: prompt > 128 KiB
+  basis: observed (E21)
+  preconditions: '-'
+  mechanism: E2BIG at exec
+  current_behaviour: FAILED unclassified
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: caller_invalid
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 2
+    I: 3
+    S: 1
+    C: 0
+    D: 0
+    R: 1
+    O: 2
+    X: 0
+  test: 200 KiB prompt
+  evidence: E21
+  requirements:
+  - ROB-CLI-001
+  risk_aggregate: 7.0
+- id: FM-CLI-005
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: worker killed (SIGKILL/SIGTERM/WSL stop)
+  basis: observed (E12, E14)
+  preconditions: '-'
+  mechanism: 'start_new_session=True: child survives the worker'
+  current_behaviour: orphan keeps editing workdir; job rerun
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'yes'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: host_environment_failure
+  retryable: after reap
+  ambiguity: high
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 5
+    S: 4
+    C: 3
+    D: 5
+    R: 3
+    O: 4
+    X: 3
+  test: e10_kill.sh, e18_sigterm.sh
+  evidence: E12, E14
+  requirements:
+  - ROB-CLI-001
+  - ROB-AMBIG-001
+  risk_aggregate: 27.0
+- id: FM-CLI-006
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: grandchildren ignore SIGTERM on cancel/timeout
+  basis: code + theoretical
+  preconditions: '-'
+  mechanism: SIGKILL escalation targets the leader only
+  current_behaviour: MCP servers/shells survive
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: process_failure
+  retryable: '-'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 2
+    I: 3
+    S: 4
+    C: 1
+    D: 2
+    R: 2
+    O: 4
+    X: 2
+  test: fake CLI spawning SIGTERM-immune child
+  evidence: cli_adapters.py:337-356
+  requirements:
+  - ROB-CLI-001
+  risk_aggregate: 17.5
+- id: FM-CLI-007
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: exit 0 with empty stdout / answer only on stderr
+  basis: observed (E07)
+  preconditions: '-'
+  mechanism: exit code is the only success criterion
+  current_behaviour: COMPLETED ''
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: malformed_response
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 4
+    S: 5
+    C: 2
+    D: 0
+    R: 2
+    O: 5
+    X: 2
+  test: e13_fake.py
+  evidence: E07
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 20.5
+- id: FM-CLI-008
+  component: provider adapter
+  provider: claude
+  operation: execute job
+  trigger: failure printed on stdout while stderr has a warning
+  basis: observed (E10); documented
+  preconditions: '-'
+  mechanism: error built from `stderr or stdout`
+  current_behaviour: recorded cause is the warning
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: protocol_error
+  retryable: '-'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 2
+    S: 4
+    C: 0
+    D: 0
+    R: 2
+    O: 4
+    X: 1
+  test: claude bad model with piped stdin
+  evidence: E10
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 13.0
+- id: FM-CLI-009
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: streaming on; multi-byte UTF-8 split across reads
+  basis: observed (E07)
+  preconditions: '-'
+  mechanism: per-chunk decode with errors='replace'; stored output = joined decoded chunks
+  current_behaviour: COMPLETED with U+FFFD corruption
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: malformed_response
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 4
+    I: 4
+    S: 5
+    C: 4
+    D: 0
+    R: 3
+    O: 5
+    X: 2
+  test: e13_fake.py stream
+  evidence: E07
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 24.5
+- id: FM-CLI-010
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: killed by signal / segfault / OOM-kill
+  basis: observed (E07)
+  preconditions: '-'
+  mechanism: '''exited -11: <partial stdout>'''
+  current_behaviour: FAILED; signal unnamed; partial answer used as error
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: process_failure
+  retryable: '-'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 2
+    I: 2
+    S: 3
+    C: 0
+    D: 0
+    R: 1
+    O: 3
+    X: 1
+  test: e13_fake.py partial_crash
+  evidence: E07
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 10.0
+- id: FM-CLI-011
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: any non-zero exit
+  basis: observed (E10)
+  preconditions: '-'
+  mechanism: classify_error returns [] for every CLI failure
+  current_behaviour: never retried; cause not recorded
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: unknown
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 5
+    I: 2
+    S: 3
+    C: 0
+    D: 0
+    R: 2
+    O: 4
+    X: 1
+  test: classify_real.py
+  evidence: E10
+  requirements:
+  - ROB-CLASS-001
+  - ROB-BACKEND-001
+  risk_aggregate: 12.5
+- id: FM-CLI-012
+  component: provider adapter
+  provider: all CLIs
+  operation: execute job
+  trigger: CLI upgrade changes flags or output
+  basis: documented (frequent releases); issue (kiro 2.25.0)
+  preconditions: '-'
+  mechanism: hard-coded presets; no version recorded
+  current_behaviour: unclassified failure or wrong success
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: protocol_error
+  retryable: '-'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 3
+    S: 4
+    C: 1
+    D: 0
+    R: 2
+    O: 4
+    X: 2
+  test: startup --version capture
+  evidence: cli_adapters.py:54-173
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 16.0
+- id: FM-CODEX-001
+  component: provider adapter
+  provider: codex 0.157.1
+  operation: execute job
+  trigger: missing/expired credentials
+  basis: observed
+  preconditions: '-'
+  mechanism: 5 internal reconnects then rc 1 with 401
+  current_behaviour: long attempt, FAILED unclassified
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: authentication
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 2
+    I: 2
+    S: 2
+    C: 0
+    D: 0
+    R: 1
+    O: 3
+    X: 1
+  test: empty CODEX_HOME probe
+  evidence: E10
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 8.5
+- id: FM-CLAUDE-001
+  component: provider adapter
+  provider: claude 2.1.287
+  operation: execute job
+  trigger: SIGTERM mid-turn
+  basis: documented
+  preconditions: '-'
+  mechanism: exit 143; turn left unfinished; no result
+  current_behaviour: treated as cancel/killed; tool side effects unknown
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: cancelled
+  retryable: '-'
+  ambiguity: high
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 3
+    S: 3
+    C: 1
+    D: 3
+    R: 2
+    O: 3
+    X: 2
+  test: fake + doc
+  evidence: code.claude.com/docs/en/headless
+  requirements:
+  - ROB-AMBIG-001
+  risk_aggregate: 17.0
+- id: FM-CLAUDE-002
+  component: provider adapter
+  provider: claude 2.1.287
+  operation: execute job
+  trigger: workdir with project hooks / .mcp.json
+  basis: documented
+  preconditions: '-'
+  mechanism: -p runs them even in untrusted folders (no --bare)
+  current_behaviour: workdir content executes
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: authorisation
+  retryable: '-'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 2
+    I: 4
+    S: 3
+    C: 2
+    D: 2
+    R: 3
+    O: 3
+    X: 3
+  test: doc
+  evidence: code.claude.com/docs/en/headless
+  requirements:
+  - ROB-SEC-001
+  risk_aggregate: 19.0
+- id: FM-GEMINI-001
+  component: provider adapter
+  provider: gemini (not installed)
+  operation: execute job
+  trigger: auth/input/sandbox/config/turn-limit failure
+  basis: documented
+  preconditions: '-'
+  mechanism: exit 41/42/44/52/53
+  current_behaviour: all unclassified
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: authentication / caller_invalid / configuration_error
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 2
+    S: 3
+    C: 0
+    D: 0
+    R: 1
+    O: 3
+    X: 1
+  test: fake CLI with documented codes
+  evidence: gemini-cli troubleshooting.md
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 10.5
+- id: FM-GEMINI-002
+  component: provider adapter
+  provider: gemini (not installed)
+  operation: execute job
+  trigger: 429 text printed during a run that succeeds
+  basis: 'issue #17906'
+  preconditions: '-'
+  mechanism: noise on stderr with exit 0
+  current_behaviour: text classifiers would misfire
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: '-'
+  retryable: '-'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 1
+    S: 2
+    C: 0
+    D: 0
+    R: 0
+    O: 2
+    X: 0
+  test: fake CLI
+  evidence: google-gemini/gemini-cli#17906
+  requirements:
+  - ROB-CLASS-001
+  risk_aggregate: 6.5
+- id: FM-KIRO-001
+  component: provider adapter
+  provider: kiro (not installed)
+  operation: execute job
+  trigger: tool approval needed in --no-interactive
+  basis: 'issue #11594'
+  preconditions: '-'
+  mechanism: tool calls fail, run continues, exit 0
+  current_behaviour: COMPLETED with work not done
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: authorisation
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 4
+    S: 5
+    C: 2
+    D: 0
+    R: 2
+    O: 5
+    X: 2
+  test: fake CLI
+  evidence: kirodotdev/Kiro#11594
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 20.5
+- id: FM-KIRO-002
+  component: provider adapter
+  provider: kiro (not installed)
+  operation: execute job
+  trigger: kiro 2.25.0 output
+  basis: issue (awslabs/cli-agent-orchestrator#832)
+  preconditions: '-'
+  mechanism: UI footer printed instead of the reply
+  current_behaviour: COMPLETED with wrong payload
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: malformed_response
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 2
+    I: 4
+    S: 5
+    C: 2
+    D: 0
+    R: 2
+    O: 5
+    X: 2
+  test: fake CLI
+  evidence: awslabs/cli-agent-orchestrator#832
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 20.0
+- id: FM-OLLAMA-001
+  component: provider adapter
+  provider: ollama 0.23.4
+  operation: execute job
+  trigger: daemon down / restarting / host address changed
+  basis: observed (E20)
+  preconditions: '-'
+  mechanism: connection refused
+  current_behaviour: 3 attempts in 3.1 s then FAILED for every queued job
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: network_transient
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 4
+    I: 4
+    S: 1
+    C: 0
+    D: 0
+    R: 2
+    O: 2
+    X: 3
+  test: e_ollama_e2e.py
+  evidence: E20
+  requirements:
+  - ROB-RETRY-001
+  risk_aggregate: 11.0
+- id: FM-OLLAMA-002
+  component: provider adapter
+  provider: ollama 0.23.4
+  operation: execute job
+  trigger: model not installed
+  basis: observed (E19, E20)
+  preconditions: '-'
+  mechanism: 404; Hoglah auto-pulls inside the attempt
+  current_behaviour: registry pull inside the job; offline pull retried as connection error
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: model_unavailable
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 3
+    I: 3
+    S: 2
+    C: 0
+    D: 0
+    R: 2
+    O: 3
+    X: 2
+  test: e_ollama_e2e.py
+  evidence: E20
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 11.0
+- id: FM-OLLAMA-003
+  component: provider adapter
+  provider: ollama 0.23.4
+  operation: execute job
+  trigger: empty prompt
+  basis: observed (E19)
+  preconditions: '-'
+  mechanism: 200 done_reason=load response ''
+  current_behaviour: COMPLETED ''
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: malformed_response
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 2
+    I: 2
+    S: 4
+    C: 1
+    D: 0
+    R: 1
+    O: 4
+    X: 1
+  test: e_ollama_e2e.py
+  evidence: E19
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 13.5
+- id: FM-OLLAMA-004
+  component: provider adapter
+  provider: ollama 0.23.4
+  operation: execute job
+  trigger: prompt longer than num_ctx
+  basis: observed (E19)
+  preconditions: '-'
+  mechanism: 200; prompt_eval_count == num_ctx (silent input truncation)
+  current_behaviour: not flagged unless done_reason==length
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: context_limit
+  retryable: 'no'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 4
+    I: 4
+    S: 5
+    C: 2
+    D: 0
+    R: 2
+    O: 5
+    X: 1
+  test: curl probe num_ctx=128
+  evidence: E19
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 20.5
+- id: FM-OLLAMA-005
+  component: provider adapter
+  provider: ollama 0.23.4 / ollama-py 0.6.2
+  operation: execute job
+  trigger: server stalls (model loading queued for memory)
+  basis: documented (FAQ) + code (AsyncClient timeout=None)
+  preconditions: '-'
+  mechanism: request queued indefinitely
+  current_behaviour: job hangs unless timeout_seconds set
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'yes'
+  failure_category: resource_exhaustion
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 2
+    I: 4
+    S: 5
+    C: 0
+    D: 0
+    R: 2
+    O: 5
+    X: 2
+  test: fake slow server
+  evidence: docs.ollama.com/faq
+  requirements:
+  - ROB-CLI-001
+  risk_aggregate: 17.0
+- id: FM-OLLAMA-006
+  component: provider adapter
+  provider: ollama 0.23.4
+  operation: execute job
+  trigger: stream ends without done:true
+  basis: code + theoretical
+  preconditions: '-'
+  mechanism: _run_stream never checks for the terminal chunk
+  current_behaviour: partial text COMPLETED
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: partial_response
+  retryable: '-'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 1
+    I: 4
+    S: 5
+    C: 2
+    D: 0
+    R: 2
+    O: 5
+    X: 1
+  test: fake stream
+  evidence: adapters.py _run_stream
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 19.0
+- id: FM-OPENAI-001
+  component: provider adapter
+  provider: OpenAI-compatible
+  operation: execute job
+  trigger: slow or hung server
+  basis: observed (E06)
+  preconditions: '-'
+  mechanism: blocking urllib on the event loop
+  current_behaviour: whole worker frozen for the call
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: possible
+  lost_result: 'no'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: timeout
+  retryable: 'yes'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 4
+    I: 5
+    S: 4
+    C: 1
+    D: 4
+    R: 2
+    O: 4
+    X: 5
+  test: e11_openai_block.py
+  evidence: E06
+  requirements:
+  - ROB-LOOP-001
+  - ROB-CLI-001
+  risk_aggregate: 24.0
+- id: FM-OPENAI-002
+  component: provider adapter
+  provider: OpenAI-compatible
+  operation: execute job
+  trigger: SSE without [DONE]/finish_reason; malformed chunk
+  basis: code
+  preconditions: '-'
+  mechanism: partial accepted; malformed chunks skipped
+  current_behaviour: COMPLETED partial
+  persistent_state_after: FAILED or COMPLETED per current behaviour
+  externally_visible: '-'
+  duplicate_execution: 'no'
+  lost_result: 'yes'
+  corrupted_state: 'no'
+  stuck_job: 'no'
+  failure_category: partial_response
+  retryable: '-'
+  ambiguity: none
+  current_logging: WARNING per attempt (string only)
+  required_logging: attempt failure{category, provider_code, exit_code, signal, excerpt, cli_version}
+  current_recovery: string-classified retry
+  proposed_recovery: see requirements
+  risk:
+    P: 1
+    I: 3
+    S: 5
+    C: 1
+    D: 0
+    R: 2
+    O: 4
+    X: 1
+  test: fake SSE server
+  evidence: http_adapter.py _post_sse
+  requirements:
+  - ROB-BACKEND-001
+  risk_aggregate: 16.0

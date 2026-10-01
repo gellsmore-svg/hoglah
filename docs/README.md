@@ -26,6 +26,7 @@ operational recipes.
 | [kafka-bridge-design.md](kafka-bridge-design.md) | Kafka transport design |
 | [rabbitmq-bridge-design.md](rabbitmq-bridge-design.md) | RabbitMQ transport design |
 | [review-2026-08-08.md](review-2026-08-08.md) | Functional + code review of 0.10.2 (fully actioned in 0.10.3–0.10.4) |
+| [robustness/](robustness/README.md) | Robustness, failure-mode and recovery requirements analysis of 0.13.0 (2026-10-01): failure catalogue, provider failures, requirements, fault-injection matrix |
 
 ## Knowledge bundle (OKF)
 
