@@ -69,7 +69,6 @@ into results, output files and callback payloads. Step 1 fixes the Kafka loss;
    every reproduced data-loss and wrong-result bug that can be fixed locally.
 2. **Approve the agent-rerun change** before Step 3 is designed, or say which
    agents should still auto-rerun.
-3. Merge PR #15 so the requirements become the reference the fixes cite.
 
 Until the fixes land, warn people not to run `hoglah clear`, not to rely on
 Kafka for messages that must not be lost, and not to pass API keys in job
