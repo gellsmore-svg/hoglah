@@ -12,6 +12,7 @@ scope.
 
 | File | Contents |
 |---|---|
+| [DECISION-BRIEF.md](DECISION-BRIEF.md) | a 3-minute brief for scheduling the work: the three problems, the agent-rerun behaviour change, what to take on trust, the decisions |
 | this README | **A** executive assessment · **B** architecture, execution and state map · answers to the completion questions |
 | [FAILURE-CATALOG.md](FAILURE-CATALOG.md) | **C** catalogue (84 failure modes with risk vectors) · **E** 26 confirmed code weaknesses with file and line |
 | [failure-catalog.yaml](failure-catalog.yaml) | the same catalogue with the full record schema, machine-readable |
