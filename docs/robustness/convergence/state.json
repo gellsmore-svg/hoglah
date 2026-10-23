@@ -1,0 +1,154 @@
+{
+ "config": {
+  "max_iterations": 8,
+  "window": 2,
+  "epsilon": 0.05,
+  "call_isolation": "full",
+  "note": "cap raised 6->8 (skill default) because the brief requires convergence"
+ },
+ "dimensions": [
+  {
+   "name": "failure_mode_coverage",
+   "polarity": "higher_better"
+  },
+  {
+   "name": "restart_reconstructability",
+   "polarity": "higher_better"
+  },
+  {
+   "name": "retry_idempotency_safety",
+   "polarity": "higher_better"
+  },
+  {
+   "name": "galeed_reconstructability",
+   "polarity": "higher_better"
+  },
+  {
+   "name": "guarantee_honesty",
+   "polarity": "higher_better"
+  },
+  {
+   "name": "simplicity_compat",
+   "polarity": "higher_better"
+  },
+  {
+   "name": "residual_high_risk",
+   "polarity": "lower_better"
+  }
+ ],
+ "iterations": [
+  {
+   "iteration": 0,
+   "scores": {
+    "failure_mode_coverage": 0.82,
+    "restart_reconstructability": 0.78,
+    "retry_idempotency_safety": 0.75,
+    "galeed_reconstructability": 0.7,
+    "guarantee_honesty": 0.85,
+    "simplicity_compat": 0.62,
+    "residual_high_risk": 0.3
+   },
+   "material_change": true,
+   "external_evidence_needed": false
+  },
+  {
+   "iteration": 1,
+   "scores": {
+    "failure_mode_coverage": 0.87,
+    "restart_reconstructability": 0.82,
+    "retry_idempotency_safety": 0.79,
+    "galeed_reconstructability": 0.72,
+    "guarantee_honesty": 0.89,
+    "simplicity_compat": 0.71,
+    "residual_high_risk": 0.23
+   },
+   "material_change": true,
+   "external_evidence_needed": false
+  },
+  {
+   "iteration": 2,
+   "scores": {
+    "failure_mode_coverage": 0.91,
+    "restart_reconstructability": 0.85,
+    "retry_idempotency_safety": 0.82,
+    "galeed_reconstructability": 0.73,
+    "guarantee_honesty": 0.9,
+    "simplicity_compat": 0.76,
+    "residual_high_risk": 0.2
+   },
+   "material_change": true,
+   "external_evidence_needed": false
+  },
+  {
+   "iteration": 3,
+   "scores": {
+    "failure_mode_coverage": 0.93,
+    "restart_reconstructability": 0.87,
+    "retry_idempotency_safety": 0.84,
+    "galeed_reconstructability": 0.74,
+    "guarantee_honesty": 0.91,
+    "simplicity_compat": 0.77,
+    "residual_high_risk": 0.18
+   },
+   "material_change": true,
+   "external_evidence_needed": false
+  },
+  {
+   "iteration": 4,
+   "scores": {
+    "failure_mode_coverage": 0.95,
+    "restart_reconstructability": 0.88,
+    "retry_idempotency_safety": 0.85,
+    "galeed_reconstructability": 0.75,
+    "guarantee_honesty": 0.92,
+    "simplicity_compat": 0.8,
+    "residual_high_risk": 0.17
+   },
+   "material_change": true,
+   "external_evidence_needed": false
+  },
+  {
+   "iteration": 5,
+   "scores": {
+    "failure_mode_coverage": 0.96,
+    "restart_reconstructability": 0.89,
+    "retry_idempotency_safety": 0.87,
+    "galeed_reconstructability": 0.75,
+    "guarantee_honesty": 0.93,
+    "simplicity_compat": 0.81,
+    "residual_high_risk": 0.16
+   },
+   "material_change": true,
+   "external_evidence_needed": false
+  },
+  {
+   "iteration": 6,
+   "scores": {
+    "failure_mode_coverage": 0.97,
+    "restart_reconstructability": 0.89,
+    "retry_idempotency_safety": 0.88,
+    "galeed_reconstructability": 0.75,
+    "guarantee_honesty": 0.94,
+    "simplicity_compat": 0.84,
+    "residual_high_risk": 0.15
+   },
+   "material_change": false,
+   "external_evidence_needed": false
+  },
+  {
+   "iteration": 7,
+   "scores": {
+    "failure_mode_coverage": 0.97,
+    "restart_reconstructability": 0.89,
+    "retry_idempotency_safety": 0.89,
+    "galeed_reconstructability": 0.75,
+    "guarantee_honesty": 0.95,
+    "simplicity_compat": 0.84,
+    "residual_high_risk": 0.15
+   },
+   "material_change": false,
+   "external_evidence_needed": false
+  }
+ ],
+ "stop_status": "STABILIZED"
+}
