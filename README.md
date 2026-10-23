@@ -1,500 +1,118 @@
 # Hoglah
 
-**Hoglah** is a lightweight, local-first job queue for [Ollama](https://ollama.com).
-It lets an application submit LLM inference work — text generation, chat, or
-embeddings — asynchronously: you get a job ID immediately, the work runs on a
-durable background queue, and you collect the result by polling, an in-process
-callback, an HTTP callback, or a written output file.
+**Hoglah is a local-first job queue for LLM work.** Your code submits a prompt
+and gets a job ID back immediately; a background worker runs it when the model
+is free; you collect the result when it is ready.
 
-It is built for resource-constrained, single-machine setups where the hardware
-can only run one (or very few) model inferences at a time, but scales out to
-multiple workers and machines when you point it at a shared backend.
+It exists for the common single-machine problem: many callers (scripts, agents,
+services) and hardware that can run only one model call, or a few, at a time.
+Hoglah puts those calls in a durable line, runs them at the rate your hardware
+allows, and keeps the results until you collect them.
 
-## Features
+## Is it for you?
 
-- **Submit and forget** — `submit()` returns a job ID instantly; the work runs on
-  a background worker.
-- **Generate, chat, and embeddings** — one queue for all three job kinds.
-- **Durable and restart-safe** — jobs and results persist; interrupted jobs and
-  undelivered callbacks are recovered on restart.
-- **Configurable concurrency** — default 1, tune for your hardware.
-- **Per-model slots** — e.g. one 70B job at a time while smaller models share.
-- **Fair multi-agent limits** — concurrent + rate caps per `session_id` or tag.
-- **Prometheus metrics** — store gauges everywhere; live process counters via
-  `hoglah run --metrics-port N` (or `hoglah_jobs` / `hoglah_jobs_terminal_store`
-  when scraping `hoglah metrics` / the web monitor).
-- **Lease-based multi-worker reclaim** — PROCESSING jobs hold a heartbeat lease;
-  dead workers' jobs are requeued without clobbering live peers.
-- **Context-aware** — auto-detects a model's context window and reports truncation
-  rather than failing.
-- **Four result-delivery paths** — poll/`wait()`, in-process callbacks (including a
-  named registry that survives restarts), per-job HTTP callbacks, and an
-  output-folder drop.
-- **Pluggable storage** — SQLite by default (zero setup), MongoDB for
-  multi-worker / multi-machine queues.
-- **Messaging bridges** — consume job requests from / publish results to **Kafka**,
-  **RabbitMQ**, or **Redis Streams**, all crash-safe.
-- **Pluggable execution backends** — Ollama, OpenAI-compatible HTTP (vLLM,
-  llama.cpp, LM Studio, …), and headless CLIs (`claude` / `codex` / `gemini` /
-  `grok` / `kiro`). Stub remains the default; real adapters are opt-in.
-- **Label groups** — `submit_sequence()` runs labelled phases in order.
-- **Model affinity + preload** — unlabelled jobs can stick to an already-loaded
-  model; optional idle-host Ollama preload of the next runnable model.
-- **Token streaming** — optional NDJSON chunk files + SSE on `hoglah serve`;
-  the job store still only keeps the final result.
-- **Safe by default** — ships with a deterministic stub adapter; real backends
-  are explicitly opt-in (`use_real=True` / `--real`).
-- **Rich CLI** — submit, inspect, wait, prune, diagnose, run a worker, and a live
-  `monitor` (auto-refreshing status counts, throughput, and recent jobs).
+**Good fit** — you run models locally (Ollama, an OpenAI-compatible server such
+as vLLM or llama.cpp, or a headless coding CLI like `claude` or `codex`) and
+need to:
 
-## Installation
+- share one GPU fairly between several agents or apps;
+- fire off work without blocking, and collect results later or by callback;
+- keep queued work across restarts, on one machine or a small fleet.
 
-**Primary (Linux, macOS, Windows with Python 3.11+):**
+**Not a fit** — you need a general workflow engine (Hoglah does simple
+`depends_on` chains only), an inference server (batching stays in Ollama or
+vLLM), or exactly-once execution (see [Know before you rely on it](#know-before-you-rely-on-it)).
+
+## Try it
 
 ```bash
-pipx install hoglah
-hoglah doctor
+pipx install hoglah        # Python 3.11+; Windows zip and other options: docs/install.md
+hoglah doctor              # checks setup; safe to paste into bug reports
 ```
-
-Upgrade: `pipx upgrade hoglah`. That does **not** delete `~/.hoglah/`.
-
-**Linux without pipx:** `./scripts/install.sh` (uses pipx if present, else an
-isolated venv). **Windows without Python:** the `hoglah-<ver>-win64.zip` from
-GitHub Releases — extract `hoglah-win64\` and run `hoglah.cmd`. Full matrix,
-upgrade table, and what we will not ship (unsigned frozen `.exe`, Snap, …):
-[docs/install.md](docs/install.md).
-
-The Ollama **daemon** is optional. `pip install hoglah` (no extras) now
-installs a working CLI; `hoglah[cli]` remains a no-op alias.
-
-Optional backends stay extras (lazy-imported):
-
-```bash
-pipx inject hoglah 'hoglah[mongo]'   # MongoDB backend
-pipx inject hoglah 'hoglah[web]'     # hoglah serve
-pip install "hoglah[kafka]"          # Kafka bridge (in a venv)
-pip install "hoglah[rabbitmq]"
-pip install "hoglah[redis]"
-```
-
-Published on PyPI: <https://pypi.org/project/hoglah/>. Requires Python 3.11+
-except the Windows portable zip.
-
-## Quick start
 
 ```python
 from hoglah import Hoglah
 
-# Context manager cleans up the background worker on exit.
-with Hoglah(use_real=True) as h:        # omit use_real for the safe stub adapter
-    job_id = h.submit(
-        prompt="Explain context windows in one sentence.",
-        model="gemma3:1b",
-        tags=["demo"],
-    )
-    print("submitted:", job_id)
-
-    result = h.wait(job_id, timeout=120)
-    print(result.status, "->", result.output)
+with Hoglah(use_real=True) as h:   # omit use_real to use the safe stub (no model calls)
+    job_id = h.submit(prompt="Explain context windows in one sentence.",
+                      model="gemma3:1b")
+    print(h.wait(job_id, timeout=120).output)
 ```
 
-Prefer callbacks over blocking? Pass one to `submit()`:
-
-```python
-h.submit(
-    prompt="...", model="gemma3:1b",
-    callback=lambda r: print("done:", r.job_id, r.output[:80]),
-)
-```
-
-Schedule work for later (stays `queued` until due; worker will not claim early):
-
-```python
-h.submit(prompt="…", model="gemma3:1b", delay_seconds=60)
-h.submit(prompt="…", model="gemma3:1b", run_at="2026-08-08T02:00:00Z")
-```
-
-Tune retries per job (OOM is not retried unless opted in):
-
-```python
-from hoglah import RetryPolicy
-
-h.submit(
-    prompt="…", model="gemma3:1b",
-    retry_policy=RetryPolicy(
-        max_retries=4,
-        base_delay=1.0,
-        max_delay=30.0,
-        jitter=0.1,
-        retry_on=("transient", "oom"),
-    ),
-)
-```
-
-Deduplicate agent retries with an idempotency key (same key → same job id):
-
-```python
-h.submit(prompt="…", model="gemma3:1b", idempotency_key="session-42/step-3")
-```
-
-Run B only after A completes (`parent_job_id` is lineage; `depends_on` is execution):
-
-```python
-a = h.submit(prompt="step 1", model="gemma3:1b")
-b = h.submit(prompt="step 2", model="gemma3:1b", depends_on=[a], parent_job_id=a)
-```
-
-Submit a batch of calls, including dependencies *inside* the batch (local names
-are resolved to job ids; a cycle is rejected and nothing is enqueued):
-
-```python
-batch = h.submit_batch(
-    [
-        {"name": "plan", "prompt": "outline the fix"},
-        {"name": "code", "prompt": "implement it", "depends_on": ["plan"]},
-        {"name": "review", "prompt": "review the patch", "depends_on": ["code"]},
-    ],
-    model="gemma3:1b",
-)
-h.wait_batch(batch.batch_id, timeout=120)
-h.cancel_batch(batch.batch_id)   # remaining jobs only
-```
-
-Take work off the queue:
-
-```python
-h.cancel(job_id)                 # queued or running; dependents fail
-h.remove(job_id)                 # cancel (if needed) then delete the row
-```
-
-### CLI
-
-```bash
-hoglah submit "Explain Hoglah" --model gemma3:1b --wait --real
-hoglah submit "later" --model gemma3:1b --delay 60
-hoglah submit "nightly" --model gemma3:1b --run-at 2026-08-08T02:00:00Z
-hoglah submit "once" --model gemma3:1b --idempotency-key agent-step-3
-hoglah ps --json                  # list jobs (machine-readable)
-hoglah status <job-id> --json
-hoglah wait <job-id> --timeout 60
-hoglah stats                      # queue overview (counts by status)
-hoglah metrics                    # Prometheus text exposition
-hoglah models --real              # available models
-hoglah show gemma3:1b             # model details (context size, template, ...)
-hoglah clear --status completed --older-than 7 --yes
-hoglah rm <job-id> --yes
-hoglah cancel <job-id>            # --no-cascade to leave dependents queued
-hoglah submit-batch jobs.json --model gemma3:1b
-hoglah list --batch <batch-id>
-hoglah dlq                        # list failed jobs (inference dead-letter view)
-hoglah requeue <job-id>           # put a failed job back on the queue
-hoglah requeue --all-failed --yes
-hoglah run --real                 # run a foreground worker (dedicated processor)
-hoglah run --real -c 2 --model-slots 'llama3.1:70b=1,gemma3:1b=2'
-hoglah doctor --real              # diagnose setup, backend, transport, connectivity
-```
-
-By default both `Hoglah()` and the CLI use a **safe stub adapter** that makes no
-model calls — handy for tests and shared environments. Opt into real inference
-with `use_real=True` (library), `--real` (CLI), or `HOGLAH_USE_REAL_ADAPTER=1`.
-
-## Job kinds
-
-### Generate and chat
-
-```python
-h.submit(prompt="Summarise this paragraph: ...", model="gemma3:1b")
-h.submit(
-    messages=[                                   # OpenAI-style chat history
-        {"role": "system", "content": "You are concise."},
-        {"role": "user", "content": "Define entropy."},
-    ],
-    model="gemma3:1b",
-)
-```
-
-### Embeddings
-
-```python
-job_id = h.submit_embedding("text to embed", model="bge-m3")
-result = h.wait(job_id)
-print(result.embedding_dim, len(result.embedding))   # e.g. 1024 1024
-```
-
-## Result delivery
-
-A terminal result can reach you four ways — use whichever fits, or several at once:
-
-1. **Poll / wait** — `h.status(job_id)` or `h.wait(job_id, timeout=...)`.
-2. **In-process callback** — `submit(..., callback=fn)`. For delivery that
-   survives a restart, register a named callback and pass `callback_key=...`.
-3. **HTTP callback** — `submit(..., callback_url="https://...")` POSTs the
-   `JobResult` JSON when the job finishes, on a background thread with retries and
-   backoff (a slow or dead endpoint never blocks the worker).
-4. **Output folder** — set `output_dir` (or `HOGLAH_OUTPUT_DIR`) and each terminal
-   job is written atomically to `<output_dir>/<job_id>.json`.
-
-## Backends
-
-Hoglah stores jobs through a pluggable `JobStore`. Two are built in; the default
-needs no setup.
-
-### SQLite (default)
-
-A single file (`~/.hoglah/hoglah.db` by default), zero extra dependencies. Best
-for one machine. The store uses write-ahead logging + a busy timeout so a
-submitter and the worker can share the file without "database is locked" errors.
-
-```python
-h = Hoglah()                                      # SQLite at ~/.hoglah/hoglah.db
-h = Hoglah(config={"db_path": "/data/queue.db"})
-```
-
-### MongoDB (optional)
-
-Point Hoglah at a MongoDB **server** instead (`pip install "hoglah[mongo]"`):
-
-```python
-h = Hoglah(config={
-    "backend": "mongo",
-    "mongo_uri": "mongodb://localhost:27017",  # default
-    "mongo_db": "hoglah",                       # default
-    "mongo_collection": "jobs",                 # default
-})
-# env equivalent: HOGLAH_BACKEND=mongo HOGLAH_MONGO_URI=mongodb://host:27017
-```
-
-Everything else — `submit`, `wait`, the CLI, callbacks, recovery — works
-identically. Use Mongo when you want:
-
-- **No single-file lock.** Job claiming is atomic server-side
-  (`find_one_and_update`), so **multiple workers, even on different machines**,
-  can drain one shared queue and still run each job exactly once.
-- **External visibility.** Jobs are native documents (request, result and tags are
-  sub-documents, not opaque JSON blobs), so you can watch the queue live from
-  `mongosh` or Compass.
-
-## Messaging bridges
-
-Hoglah can bridge an existing message broker **without owning it**: it consumes
-job-request messages from an input topic/queue/stream into the durable queue,
-processes them with the normal serial worker, and publishes result messages back.
-A bridge is a *transport adapter*, not a storage backend — the SQLite/Mongo store
-remains the source of truth.
-
-All three bridges share one message contract and the same crash-safety design:
-
-- **Input** (JSON): a unique `correlation_id` is required and doubles as the
-  idempotency key. Optional `reply_to` overrides the result destination
-  per-message.
-
-  ```json
-  { "correlation_id": "9b1c…", "model": "gemma3:1b", "prompt": "…",
-    "options": { "temperature": 0.7 }, "reply_to": "team-x-replies" }
-  ```
-
-- **Output** echoes the `correlation_id` so async callers can match results:
-
-  ```json
-  { "correlation_id": "9b1c…", "job_id": "…", "status": "completed",
-    "output": "…", "error": null }
-  ```
-
-- **Crash safety:** ingress commits the broker offset only **after** a durable,
-  idempotent enqueue (a redelivery after a crash is a harmless no-op); egress uses
-  a transactional outbox (a result is marked published only after the broker acks,
-  and unpublished results are re-emitted on restart); poison (un-parseable)
-  messages are routed to a dead-letter destination so they never block the queue.
-
-Enable **at most one** bridge per instance (precedence kafka > rabbitmq > redis).
-
-### Kafka
-
-```bash
-pip install "hoglah[kafka]"
-hoglah kafka-bridge --bootstrap-servers localhost:9092 \
-                    --input-topic hoglah-jobs --results-topic hoglah-results
-```
-
-```python
-h = Hoglah(config={
-    "kafka_enabled": True,
-    "kafka_bootstrap_servers": "localhost:9092",
-    "kafka_input_topic": "hoglah-jobs",
-    "kafka_results_topic": "hoglah-results",
-})
-```
-
-Scale horizontally by running several `hoglah kafka-bridge` processes in one
-consumer group; sharing one MongoDB store gives fleet-wide exactly-once execution
-via the server-side atomic claim.
-
-### RabbitMQ
-
-```bash
-pip install "hoglah[rabbitmq]"
-hoglah rabbitmq-bridge --url amqp://guest:guest@localhost:5672/ \
-                       --input-queue hoglah-jobs --results-queue hoglah-results
-```
-
-```python
-h = Hoglah(config={
-    "rabbitmq_enabled": True,
-    "rabbitmq_url": "amqp://guest:guest@localhost:5672/",
-    "rabbitmq_input_queue": "hoglah-jobs",
-    "rabbitmq_results_queue": "hoglah-results",
-})
-```
-
-RabbitMQ's per-message model is a clean fit: ingress acks each message after a
-durable enqueue (no head-of-line blocking), poison messages are `nack`'d to a
-**dead-letter exchange**, and egress uses **publisher confirms**.
-
-### Redis Streams
-
-```bash
-pip install "hoglah[redis]"
-hoglah redis-bridge --url redis://localhost:6379/0 \
-                    --input-stream hoglah-jobs --results-stream hoglah-results
-```
-
-```python
-h = Hoglah(config={
-    "redis_enabled": True,
-    "redis_url": "redis://localhost:6379/0",
-    "redis_input_stream": "hoglah-jobs",
-    "redis_results_stream": "hoglah-results",
-    "redis_consumer_name": "hoglah-1",   # stable across restarts for crash recovery
-})
-```
-
-The lightest-weight option — Redis is often already in the stack. Uses a consumer
-group with explicit `XACK` after a durable enqueue; a consumer's unacked entries
-(its Pending Entries List) are recovered on restart via a stable consumer name, so
-a crash mid-processing re-delivers rather than loses. Run several `redis-bridge`
-processes (distinct `--consumer-name`s) in one group to scale out.
-
-## Web monitor & debugging
-
-- `hoglah serve` (needs `pip install hoglah[web]`, default `127.0.0.1:8781`) — a
-  read-only queue dashboard: live status cards, jobs table with step names, and
-  a job detail page showing the full input and output.
-- `hoglah debug [JOB_ID]` — the clean In→Out call tree for executed jobs
-  (chains render as trees; `--verbose` reveals model/timing/metadata). Requires
-  `galeed[cli]` and capture enabled.
-- **Family trace spine**: with `galeed_enabled` (env `HOGLAH_GALEED_ENABLED=1`,
-  `galeed` extra) every job emits lifecycle events to Galeed, and with
-  `galeed_capture_io` (default on) records its complete prompt/messages and
-  output into the `llm_calls` debugging store — viewable via `galeed trace`,
-  `galeed serve`, or Mizpah. Label calls with `submit(step_name=...)` / `--step`
-  and thread `metadata={"trace_id": ...}` through multi-step flows.
-
-## Configuration
-
-Every option can be set in the `Hoglah(config={...})` dict or via a `HOGLAH_*`
-environment variable. Common ones:
-
-| Setting | Env var | Default | Purpose |
-|---|---|---|---|
-| `db_path` | `HOGLAH_DB_PATH` | `~/.hoglah/hoglah.db` | SQLite database file |
-| `backend` | `HOGLAH_BACKEND` | `sqlite` | `sqlite` or `mongo` |
-| `concurrency` | `HOGLAH_CONCURRENCY` | `1` | Parallel jobs per worker |
-| `lease_seconds` | `HOGLAH_LEASE_SECONDS` | `30` | PROCESSING lease TTL |
-| `model_slots` | `HOGLAH_MODEL_SLOTS` | `{}` | Per-model concurrency (`name=n,…`) |
-| `session_slots` | `HOGLAH_SESSION_SLOTS` | `None` | Concurrent jobs per session_id |
-| `ollama_host` | `HOGLAH_OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
-| `output_dir` | `HOGLAH_OUTPUT_DIR` | `None` | Write terminal results here |
-| `log_level` | `HOGLAH_LOG_LEVEL` | `INFO` | Logging level |
-
-Backend- and bridge-specific keys (`mongo_*`, `kafka_*`, `rabbitmq_*`, `redis_*`)
-and fairness settings (`tag_slots`, rates) follow the same pattern — full tables
-in the [user guide](docs/user-guide.md#13-configuration-cheat-sheet).
-`hoglah doctor` prints the active backend and transport (never connection URLs).
-
-## Real Ollama notes
-
-The real adapter talks to Ollama (which uses llama.cpp for inference). Enable it
-with `use_real=True` / `--real` / `HOGLAH_USE_REAL_ADAPTER=1`, and make sure the
-model is available (`hoglah pull <model>` or auto-pull on first real submit).
-
-**Installing models from Hugging Face.** Ollama can pull any GGUF model straight
-from the Hugging Face Hub, so `hoglah pull` does too — just use an `hf.co/...`
-name with the quant as the tag:
-
-```bash
-hoglah pull --real "hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"
-# then submit to it like any other model:
-hoglah submit "hello" --model "hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M" --real --wait
-```
-
-The model then works everywhere a model name is accepted (CLI, library, the
-messaging bridges). Size it to your hardware: a model must fit in VRAM (with
-spillover to system RAM, which is much slower on CPU) — frontier models like
-MiniMax-M3 or Kimi-K2 (hundreds of GB) need server-class hardware, not a laptop.
-
-**Native Linux:** when Ollama runs on the same machine as Hoglah, the default
-`http://localhost:11434` is sufficient — no extra networking setup.
-
-**WSL2:** if Ollama runs as the Windows binary and your code runs in WSL, the
-daemon is *not* reachable at `localhost`. Set `OLLAMA_HOST=0.0.0.0` on the Windows
-side (`setx OLLAMA_HOST "0.0.0.0"`, then restart Ollama) and point the client at
-the WSL2 gateway IP:
-
-```bash
-OLLAMA_HOST="http://$(ip route show default | awk '{print $3}'):11434" \
-  hoglah doctor --real
-```
-
-## Reporting bugs & support
-
-Open an issue at
-[github.com/gellsmore-svg/hoglah/issues](https://github.com/gellsmore-svg/hoglah/issues)
-— the **Bug report** template prompts for what's needed. To make a report
-actionable, include:
-
-- the output of **`hoglah doctor`** (`--real` if you use a real Ollama host) — it
-  reports version, adapter, backend, and active transport, and is safe to paste
-  (it never prints connection URLs/credentials);
-- your Hoglah version (`hoglah --version`), Python version, and OS;
-- a minimal reproduction.
-
-**Security issues:** please report privately — see [SECURITY.md](SECURITY.md) —
-rather than opening a public issue.
+Or from the shell: `hoglah submit "Explain Hoglah" --model gemma3:1b --wait --real`.
+
+Hoglah **makes no model calls until you opt in** (`use_real=True`, `--real`, or
+`HOGLAH_USE_REAL_ADAPTER=1`). Until then a deterministic stub answers, so tests
+and shared environments are safe by default.
+
+## How it works
+
+Every job is a row in a store: a SQLite file by default
+(`~/.hoglah/hoglah.db`, nothing to set up), or MongoDB when several workers or
+machines share one queue. A worker claims a job, holds a heartbeat lease on it
+while the model runs, and writes the result back. The store, not the worker, is
+the source of truth, so a job whose worker dies is reclaimed by another worker
+when the lease expires.
+
+You get a finished result in whichever way suits the caller: `wait()` /
+polling, an in-process callback, an HTTP callback, or a JSON file in an output
+folder.
+
+## Add what you need
+
+Everything below is optional. Each link goes to the
+[user guide](docs/user-guide.md) section that covers it.
+
+| When you need… | Use | Guide |
+|---|---|---|
+| Delays, schedules, retries, de-duplication, A-before-B chains, batches | `delay_seconds` / `run_at`, `RetryPolicy`, `idempotency_key`, `depends_on`, `submit_batch` | [§6](docs/user-guide.md#6-scheduling-retries-dependencies-idempotency) |
+| Fair sharing: one 70B job at a time, caps per agent or tag | `concurrency`, `model_slots`, session/tag slots and rates | [§7](docs/user-guide.md#7-concurrency-slots-and-fairness) |
+| A backend other than Ollama | OpenAI-compatible HTTP; `claude` / `codex` / `gemini` / `grok` / `kiro` CLIs | [§7](docs/user-guide.md#execution-backends-ollama-openai-compat-clis) |
+| Chat, embeddings, token streaming | `messages=`, `submit_embedding`, NDJSON + SSE | [§4](docs/user-guide.md#4-library-quick-start), [§9](docs/user-guide.md#9-result-delivery) |
+| Several workers or machines on one queue | MongoDB store (`hoglah[mongo]`) | [§8](docs/user-guide.md#8-storage-backends), [§14](docs/user-guide.md#14-topologies-recipes) |
+| Jobs arriving from Kafka, RabbitMQ or Redis Streams | `hoglah kafka-bridge` / `rabbitmq-bridge` / `redis-bridge` | [§11](docs/user-guide.md#11-messaging-bridges) |
+| Watching the queue | `hoglah monitor`, `hoglah serve` (web), Prometheus, Galeed traces | [§12](docs/user-guide.md#12-observability) |
+| Every setting and its `HOGLAH_*` variable | — | [§13](docs/user-guide.md#13-configuration-cheat-sheet) |
+| Hugging Face GGUF models, WSL2 networking | `hoglah pull "hf.co/…:Q4_K_M"` | [§15](docs/user-guide.md#15-real-ollama-notes) |
+
+## Know before you rely on it
+
+A failure analysis of v0.13.0 ([docs/robustness](docs/robustness/DECISION-BRIEF.md))
+reproduced these. Fixes are planned but not yet shipped.
+
+- **A job can run more than once.** After a worker crash, a lost heartbeat or a
+  clock jump, a job may be executed again, including CLI agent jobs that edit
+  files. Make such jobs safe to repeat. Execution is at-least-once, including on
+  MongoDB.
+- **`hoglah clear` deletes before it asks.** Answering "n" does not undo it.
+- **The Kafka bridge can skip a message** when the store errors, despite logging
+  "will retry". RabbitMQ and Redis bridge recovery has not been tested against
+  live brokers.
+- **Don't put secrets in job `metadata`.** It is copied into results, output
+  files and callback payloads.
+- **If Galeed tracing is enabled and unreachable, every submit stalls about 2 s.**
 
 ## Documentation
 
-| Audience | Doc |
+| For | Read |
 |---|---|
-| **Humans** (operators, app developers) | [docs/user-guide.md](docs/user-guide.md) |
-| **AI agents** / tool-using models | [docs/ai-user-guide.md](docs/ai-user-guide.md) |
-| **Docs index** | [docs/README.md](docs/README.md) |
-| **Coding agents working in this repo** | [AGENTS.md](AGENTS.md) |
+| Using Hoglah (operators, app developers) | [docs/user-guide.md](docs/user-guide.md) |
+| AI agents and tool-using models | [docs/ai-user-guide.md](docs/ai-user-guide.md) |
+| Coding agents working in this repo | [AGENTS.md](AGENTS.md) |
+| Everything else: design, requirements, robustness, roadmap | [docs/README.md](docs/README.md) |
+| Concept map (Open Knowledge Format) | [okf/index.md](okf/index.md) |
 
-Also: [CHANGELOG](CHANGELOG.md), [CONTRIBUTING](CONTRIBUTING.md),
-[SECURITY](SECURITY.md).
+Also: [CHANGELOG](CHANGELOG.md) · [feature comparison and gaps](docs/feature-comparison-and-gaps.md).
 
-## Feature comparison & gaps
+## Bugs and support
 
-Living checklist of Hoglah vs similar queues (RQ, Celery, Dramatiq, LLM
-gateways, …) and prioritised open gaps:
+Open an [issue](https://github.com/gellsmore-svg/hoglah/issues) using the bug
+report template, and include `hoglah doctor` output (add `--real` if you use a
+real backend; it never prints URLs or credentials), `hoglah --version`, your
+Python version and OS, and a minimal reproduction. Report security issues
+privately: see [SECURITY.md](SECURITY.md).
 
-- [`docs/feature-comparison-and-gaps.md`](docs/feature-comparison-and-gaps.md)
+## License and contributing
 
-Update that file when shipping queue features or re-prioritising work.
-
-## Knowledge bundle
-
-A machine- and human-readable knowledge map of Hoglah's concepts, modules, and CLI
-is published as an [Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
-bundle under [`okf/`](okf/index.md) — markdown with YAML frontmatter, linked into a
-concept graph. Guides for day-to-day use are the human/AI user guides above;
-OKF is the structured concept map.
-
-## License
-
-Apache 2.0 — see [LICENSE](LICENSE). Named after one of the daughters of
-Zelophehad (Numbers 27).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Apache 2.0, see [LICENSE](LICENSE). Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
+Named after one of the daughters of Zelophehad (Numbers 27).
