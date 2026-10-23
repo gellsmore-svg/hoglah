@@ -30,8 +30,10 @@ HTTP webhook, file drop, and/or a messaging broker.
 - Serial / low-concurrency inference on constrained hardware (default concurrency 1)
 - Safe defaults (stub adapter; real Ollama is opt-in)
 - Multi-agent fairness (session/tag slots and rates, per-model slots)
-- Crash-safe multi-worker reclaim (leases + heartbeat)
-- Crash-safe messaging bridges (Kafka / RabbitMQ / Redis Streams)
+- Multi-worker reclaim (leases + heartbeat). Execution is at-least-once, not
+  exactly-once: see [robustness/DECISION-BRIEF.md](robustness/DECISION-BRIEF.md)
+- Messaging bridges (Kafka / RabbitMQ / Redis Streams). The Kafka bridge can
+  currently skip a message on a store error (robustness E18)
 
 ---
 
@@ -520,6 +522,11 @@ hoglah rabbitmq-bridge --url amqp://guest:guest@localhost:5672/
 hoglah redis-bridge --url redis://localhost:6379/0
 ```
 
+**Redis:** give each bridge process a consumer name that stays the same across
+restarts (`--consumer-name` / `redis_consumer_name`). Its unacknowledged
+entries are recovered on restart only under the same name. Use distinct names
+to run several bridges in one group.
+
 See [kafka-bridge-design.md](kafka-bridge-design.md) and
 [rabbitmq-bridge-design.md](rabbitmq-bridge-design.md).
 
@@ -656,8 +663,16 @@ speak the JSON contract.
 - Enable: `use_real=True` / `--real` / `HOGLAH_USE_REAL_ADAPTER=1`
 - Pull: `hoglah pull MODEL --real` (supports `hf.co/...:QUANT` GGUF names)
 - Native Linux: default `http://localhost:11434`
-- **WSL2:** Ollama on Windows is not `localhost` from WSL — set `OLLAMA_HOST`
-  on Windows and point the client at the WSL gateway IP (see root README)
+- **WSL2:** Ollama on Windows is not `localhost` from WSL. On Windows run
+  `setx OLLAMA_HOST "0.0.0.0"` and restart Ollama, then point the client at the
+  WSL gateway IP:
+
+  ```bash
+  OLLAMA_HOST="http://$(ip route show default | awk '{print $3}'):11434" \
+    hoglah doctor --real
+  ```
+- Size models to your hardware: a model must fit in VRAM (spillover to system
+  RAM is much slower on CPU).
 
 ---
 
