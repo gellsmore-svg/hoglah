@@ -41,6 +41,11 @@ with Hoglah(use_real=True) as h:   # omit use_real to use the safe stub (no mode
 
 Or from the shell: `hoglah submit "Explain Hoglah" --model gemma3:1b --wait --real`.
 
+**Version note:** PyPI currently has 0.11.0. The OpenAI-compatible and CLI
+backends, label groups, model affinity (0.12) and token streaming (0.13) need
+an install from source:
+`pipx install git+https://github.com/gellsmore-svg/hoglah`.
+
 Hoglah **makes no model calls until you opt in** (`use_real=True`, `--real`, or
 `HOGLAH_USE_REAL_ADAPTER=1`). Until then a deterministic stub answers, so tests
 and shared environments are safe by default.
